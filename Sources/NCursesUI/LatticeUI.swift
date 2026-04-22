@@ -61,7 +61,7 @@ extension EnvironmentValues {
 //   WatchlistView().environment(\.lattice, lattice)
 
 @propertyWrapper
-public struct LiveQuery<T: Model>: DynamicProperty {
+public struct Query<T: Model>: DynamicProperty {
     /// Nested @Observable wrapper — persists across view struct replacement (framework
     /// carries the class ref forward). Reads of `value` register with
     /// `withObservationTracking`; Lattice's observer fires a fetch which writes
@@ -90,20 +90,20 @@ public struct LiveQuery<T: Model>: DynamicProperty {
                 return
             }
             let tag = String(UInt(bitPattern: ObjectIdentifier(self).hashValue) & 0xFFFF, radix: 16)
-            latLog("[LiveQuery<\(T.self)>#\(tag)] bind start lattice=\(ObjectIdentifier(lattice as AnyObject).hashValue & 0xFFFF)")
+            latLog("[Query<\(T.self)>#\(tag)] bind start lattice=\(ObjectIdentifier(lattice as AnyObject).hashValue & 0xFFFF)")
             self.lattice = lattice
             fetch()
             let live = lattice.objects(T.self).where(predicate)
             self.token = live.observe { [weak self] (_: Any) in
-                latLog("[LiveQuery<\(T.self)>#\(tag)] observe fired -> fetch")
+                latLog("[Query<\(T.self)>#\(tag)] observe fired -> fetch")
                 self?.fetch()
             }
-            latLog("[LiveQuery<\(T.self)>#\(tag)] bind done (observe armed)")
+            latLog("[Query<\(T.self)>#\(tag)] bind done (observe armed)")
         }
 
         public func fetch() {
             guard let lattice else {
-                latLog("[LiveQuery<\(T.self)>] fetch skipped (no lattice)")
+                latLog("[Query<\(T.self)>] fetch skipped (no lattice)")
                 return
             }
             let t0 = Date()
@@ -111,7 +111,7 @@ public struct LiveQuery<T: Model>: DynamicProperty {
             if let sort { results = results.sortedBy(sort) }
             self.value = results
             let dt = Date().timeIntervalSince(t0) * 1000
-            latLog("[LiveQuery<\(T.self)>] fetch -> set value (\(String(format: "%.1f", dt))ms; lazy — no SQL until iterated)")
+            latLog("[Query<\(T.self)>] fetch -> set value (\(String(format: "%.1f", dt))ms; lazy — no SQL until iterated)")
         }
     }
 
@@ -141,7 +141,7 @@ public struct LiveQuery<T: Model>: DynamicProperty {
 
 @MainActor
 @propertyWrapper
-public struct LiveSnapshot<T: Model>: @preconcurrency DynamicProperty {
+public struct Snapshot<T: Model>: @preconcurrency DynamicProperty {
     /// Nested @Observable wrapper — persists across view struct replacement (framework
     /// carries the class ref forward). Reads of `value` register with
     /// `withObservationTracking`; Lattice's observer fires a fetch which writes
@@ -180,19 +180,19 @@ public struct LiveSnapshot<T: Model>: @preconcurrency DynamicProperty {
 
             func bind(_ lattice: LatticeThreadSafeReference, parent: Wrapper) {
                 let tag = String(UInt(bitPattern: ObjectIdentifier(self).hashValue) & 0xFFFF, radix: 16)
-                latLog("[LiveSnapshot<\(T.self)>.materializer#\(tag)] bind entered (on LatticeUIActor), calling ref.resolve()")
+                latLog("[Snapshot<\(T.self)>.materializer#\(tag)] bind entered (on LatticeUIActor), calling ref.resolve()")
                 let tR0 = Date()
                 guard let resolved = lattice.resolve() else {
-                    latLog("[LiveSnapshot<\(T.self)>.materializer#\(tag)] bind FAILED — ref.resolve() returned nil")
+                    latLog("[Snapshot<\(T.self)>.materializer#\(tag)] bind FAILED — ref.resolve() returned nil")
                     return
                 }
                 let tRdt = Date().timeIntervalSince(tR0) * 1000
-                latLog("[LiveSnapshot<\(T.self)>.materializer#\(tag)] ref.resolve() took \(String(format: "%.1f", tRdt))ms")
+                latLog("[Snapshot<\(T.self)>.materializer#\(tag)] ref.resolve() took \(String(format: "%.1f", tRdt))ms")
                 guard self.lattice?.configuration != resolved.configuration else {
-                    latLog("[LiveSnapshot<\(T.self)>.materializer#\(tag)] bind skipped (same config)")
+                    latLog("[Snapshot<\(T.self)>.materializer#\(tag)] bind skipped (same config)")
                     return
                 }
-                latLog("[LiveSnapshot<\(T.self)>.materializer#\(tag)] bind start limit=\(limit?.description ?? "nil")")
+                latLog("[Snapshot<\(T.self)>.materializer#\(tag)] bind start limit=\(limit?.description ?? "nil")")
                 self.token?.cancel()
                 self.lattice = resolved
                 self.wrapper = parent
@@ -202,17 +202,17 @@ public struct LiveSnapshot<T: Model>: @preconcurrency DynamicProperty {
                     Task { @LatticeUIActor [weak self] in
                         guard let self else { return }
                         self.observeFireCount += 1
-                        latLog("[LiveSnapshot<\(T.self)>.materializer#\(tag)] observe fired #\(self.observeFireCount) -> fetch")
+                        latLog("[Snapshot<\(T.self)>.materializer#\(tag)] observe fired #\(self.observeFireCount) -> fetch")
                         self.fetch()
                     }
                 }
-                latLog("[LiveSnapshot<\(T.self)>.materializer#\(tag)] bind done (observe armed)")
+                latLog("[Snapshot<\(T.self)>.materializer#\(tag)] bind done (observe armed)")
             }
 
             func fetch() {
                 let tag = String(UInt(bitPattern: ObjectIdentifier(self).hashValue) & 0xFFFF, radix: 16)
                 guard let lattice else {
-                    latLog("[LiveSnapshot<\(T.self)>.materializer#\(tag)] fetch skipped (no lattice)")
+                    latLog("[Snapshot<\(T.self)>.materializer#\(tag)] fetch skipped (no lattice)")
                     return
                 }
                 fetchCount += 1
@@ -222,12 +222,12 @@ public struct LiveSnapshot<T: Model>: @preconcurrency DynamicProperty {
                 let snapshot = results.snapshot(limit: limit, offset: offset)
                 let refs = snapshot.map(\.sendableReference)
                 let dt = Date().timeIntervalSince(t0) * 1000
-                latLog("[LiveSnapshot<\(T.self)>.materializer#\(tag)] fetch #\(fetchCount) -> \(refs.count) refs (\(String(format: "%.1f", dt))ms, observes=\(observeFireCount))")
+                latLog("[Snapshot<\(T.self)>.materializer#\(tag)] fetch #\(fetchCount) -> \(refs.count) refs (\(String(format: "%.1f", dt))ms, observes=\(observeFireCount))")
                 let w = self.wrapper
                 Task { @MainActor in
-                    latLog("[LiveSnapshot<\(T.self)>.materializer#\(tag)] set-task entered on main, refs=\(refs.count), wrapper=\(w == nil ? "nil" : "alive")")
+                    latLog("[Snapshot<\(T.self)>.materializer#\(tag)] set-task entered on main, refs=\(refs.count), wrapper=\(w == nil ? "nil" : "alive")")
                     w?.set(value: refs)
-                    latLog("[LiveSnapshot<\(T.self)>.materializer#\(tag)] set-task finished")
+                    latLog("[Snapshot<\(T.self)>.materializer#\(tag)] set-task finished")
                 }
             }
         }
@@ -253,7 +253,7 @@ public struct LiveSnapshot<T: Model>: @preconcurrency DynamicProperty {
             let tag = String(UInt(bitPattern: ObjectIdentifier(self).hashValue) & 0xFFFF, radix: 16)
             // Config-compare guard: same lattice = no-op, env swap = rebind.
             guard self.lattice?.configuration != lattice.configuration else { return }
-            latLog("[LiveSnapshot<\(T.self)>.wrapper#\(tag)] bind called -> scheduling on LatticeUIActor")
+            latLog("[Snapshot<\(T.self)>.wrapper#\(tag)] bind called -> scheduling on LatticeUIActor")
             self.lattice = lattice
             let ref = lattice.sendableReference
             let materializer = self.materializer
@@ -276,9 +276,9 @@ public struct LiveSnapshot<T: Model>: @preconcurrency DynamicProperty {
         fileprivate func set(value: [ModelThreadSafeReference<T>]) {
             let tag = String(UInt(bitPattern: ObjectIdentifier(self).hashValue) & 0xFFFF, radix: 16)
             let tEnter = Date()
-            latLog("[LiveSnapshot<\(T.self)>.wrapper#\(tag)] set ENTER on main (refs=\(value.count))")
+            latLog("[Snapshot<\(T.self)>.wrapper#\(tag)] set ENTER on main (refs=\(value.count))")
             guard let lattice else {
-                latLog("[LiveSnapshot<\(T.self)>.wrapper#\(tag)] set SKIPPED (no lattice on wrapper)")
+                latLog("[Snapshot<\(T.self)>.wrapper#\(tag)] set SKIPPED (no lattice on wrapper)")
                 return
             }
             // Decompose `value.resolve(on: lattice)` into its internal steps so
@@ -297,23 +297,23 @@ public struct LiveSnapshot<T: Model>: @preconcurrency DynamicProperty {
                 Mirror(reflecting: ref).children.first?.value as? Int64
             }
             let dtStep1 = Date().timeIntervalSince(tStep1) * 1000
-            latLog("[LiveSnapshot<\(T.self)>.wrapper#\(tag)] set: sample keys \(sampleKeys) (mirror \(String(format: "%.1f", dtStep1))ms)")
+            latLog("[Snapshot<\(T.self)>.wrapper#\(tag)] set: sample keys \(sampleKeys) (mirror \(String(format: "%.1f", dtStep1))ms)")
 
             let tBuild = Date()
             let results = lattice.objects(T.self)
             let dtBuild = Date().timeIntervalSince(tBuild) * 1000
-            latLog("[LiveSnapshot<\(T.self)>.wrapper#\(tag)] set: lattice.objects() \(String(format: "%.1f", dtBuild))ms")
+            latLog("[Snapshot<\(T.self)>.wrapper#\(tag)] set: lattice.objects() \(String(format: "%.1f", dtBuild))ms")
 
             let tResolve = Date()
             let resolved: [T] = value.resolve(on: lattice)
             let dtResolve = Date().timeIntervalSince(tResolve) * 1000
-            latLog("[LiveSnapshot<\(T.self)>.wrapper#\(tag)] set: value.resolve() \(String(format: "%.1f", dtResolve))ms -> \(resolved.count)/\(value.count)")
+            latLog("[Snapshot<\(T.self)>.wrapper#\(tag)] set: value.resolve() \(String(format: "%.1f", dtResolve))ms -> \(resolved.count)/\(value.count)")
 
             let tAssign = Date()
             self.value = resolved
             let dtAssign = Date().timeIntervalSince(tAssign) * 1000
             let dtTotal = Date().timeIntervalSince(tEnter) * 1000
-            latLog("[LiveSnapshot<\(T.self)>.wrapper#\(tag)] set EXIT: self.value= \(String(format: "%.1f", dtAssign))ms | total \(String(format: "%.1f", dtTotal))ms")
+            latLog("[Snapshot<\(T.self)>.wrapper#\(tag)] set EXIT: self.value= \(String(format: "%.1f", dtAssign))ms | total \(String(format: "%.1f", dtTotal))ms")
             _ = results
         }
     }
