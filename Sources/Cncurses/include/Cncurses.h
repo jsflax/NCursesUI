@@ -2,6 +2,7 @@
 #define CNCURSES_H
 
 #include <curses.h>
+#include <panel.h>
 #include <locale.h>
 
 // ncurses macros that don't bridge to Swift as they expand to complex expressions
@@ -82,5 +83,41 @@ static inline void tui_disable_mouse(void) {
     fflush(stdout);
     mousemask(0, NULL);
 }
+
+// Windows — needed for per-overlay draw targets backed by libpanel.
+// Unlike pads (newpad), these have screen positions and participate in
+// the panel stack. `tui_newwin` creates a positioned window, `tui_mvwin`
+// repositions it, and `tui_wclear`/`tui_wnoutrefresh` manage its content.
+static inline WINDOW *tui_newwin(int rows, int cols, int y, int x) {
+    return newwin(rows, cols, y, x);
+}
+static inline int tui_mvwin(WINDOW *w, int y, int x) { return mvwin(w, y, x); }
+static inline int tui_wresize(WINDOW *w, int rows, int cols) {
+    return wresize(w, rows, cols);
+}
+static inline int tui_wclear(WINDOW *w) { return wclear(w); }
+
+// Change the attributes of N cells starting at (y, x) WITHOUT overwriting
+// the characters. Used by Overlay's dim-background pass: walk the main
+// panel's visible cells outside the overlay rect and OR in A_DIM.
+static inline int tui_mvwchgat(WINDOW *w, int y, int x, int n, int attr, short pair) {
+    return mvwchgat(w, y, x, n, (attr_t)attr, pair, NULL);
+}
+
+// libpanel — stackable windows. `update_panels` recomputes which cells of
+// each window are visible based on z-order; `doupdate` then flushes. The
+// top panel's keystrokes are routed by our own dispatch; libpanel just
+// manages the visible-region arithmetic.
+static inline PANEL *tui_new_panel(WINDOW *w)        { return new_panel(w); }
+static inline int    tui_del_panel(PANEL *p)         { return del_panel(p); }
+static inline int    tui_top_panel(PANEL *p)         { return top_panel(p); }
+static inline int    tui_bottom_panel(PANEL *p)      { return bottom_panel(p); }
+static inline int    tui_hide_panel(PANEL *p)        { return hide_panel(p); }
+static inline int    tui_show_panel(PANEL *p)        { return show_panel(p); }
+static inline int    tui_panel_hidden(const PANEL *p){ return panel_hidden(p); }
+static inline int    tui_move_panel(PANEL *p, int y, int x) { return move_panel(p, y, x); }
+static inline int    tui_replace_panel(PANEL *p, WINDOW *w) { return replace_panel(p, w); }
+static inline void   tui_update_panels(void)         { update_panels(); }
+static inline WINDOW *tui_panel_window(const PANEL *p) { return panel_window(p); }
 
 #endif

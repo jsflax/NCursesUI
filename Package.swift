@@ -8,6 +8,7 @@ let package = Package(
     products: [
         .library(name: "NCursesUI", targets: ["NCursesUI"]),
         .library(name: "Cncurses", targets: ["Cncurses"]),
+        .executable(name: "WidgetsDemo", targets: ["WidgetsDemo"]),
     ],
     dependencies: [
         .package(url: "https://github.com/apple/swift-log", from: "1.6.0"),
@@ -15,7 +16,10 @@ let package = Package(
     targets: [
         .target(
             name: "Cncurses",
-            linkerSettings: [.linkedLibrary("ncurses")]
+            linkerSettings: [
+                .linkedLibrary("ncurses"),
+                .linkedLibrary("panel"),
+            ]
         ),
         .target(
             name: "NCursesUI",
@@ -27,6 +31,11 @@ let package = Package(
         .testTarget(
             name: "NCursesUITests",
             dependencies: ["NCursesUI"]
+        ),
+        .executableTarget(
+            name: "WidgetsDemo",
+            dependencies: ["NCursesUI"],
+            path: "Examples/WidgetsDemo"
         ),
     ]
 )

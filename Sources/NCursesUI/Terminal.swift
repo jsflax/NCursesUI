@@ -34,7 +34,15 @@ public protocol Screen: AnyObject, Sendable {
 // MARK: - Color
 
 public enum Color: Int32, Sendable {
-    case green = 1, red = 2, yellow = 3, cyan = 4, selected = 5, dim = 6, magenta = 7
+    case green = 1
+    case red = 2
+    case yellow = 3
+    case cyan = 4
+    case selected = 5    // white on blue — selection highlight
+    case dim = 6
+    case magenta = 7
+    case blue = 8
+    case white = 9
 }
 
 // MARK: - Mouse / unified event
@@ -54,6 +62,19 @@ public enum TermEvent: Sendable, Equatable {
     case mouse(MouseEvent)
     case none
 }
+
+// MARK: - Extended key codes
+//
+// ncurses' KEY_* range runs up through ~0x1FF. We claim 0x400+ for keys
+// ncurses doesn't decode (because we disable keypad mode to preserve raw
+// mouse reports — see `setup` below). Used for Option+Arrow word-wise
+// navigation on macOS. Decoded from `ESC [1;3<letter>` in `decodeAfterEsc`.
+public let KEY_ALT_UP:    Int32 = 0x400
+public let KEY_ALT_DOWN:  Int32 = 0x401
+public let KEY_ALT_RIGHT: Int32 = 0x402
+public let KEY_ALT_LEFT:  Int32 = 0x403
+/// Option+Backspace — many macOS terminals send `ESC DEL` (ESC + 0x7f).
+public let KEY_ALT_BACKSPACE: Int32 = 0x404
 
 // MARK: - NCursesScreen (production)
 //
@@ -116,11 +137,20 @@ public final class NCursesScreen: Screen, @unchecked Sendable {
     }
 
     public func flush() {
-        _ = tui_wnoutrefresh(tui_stdscr())
+        // Pad blits go first — they write directly into the virtual screen
+        // at their target region. Safe to interleave with panels since
+        // `update_panels` (below) will paint panel cells on top.
         for r in pendingPadRefreshes {
             _ = tui_pnoutrefresh(r.pad, r.padY, r.padX, r.sy1, r.sx1, r.sy2, r.sx2)
         }
         pendingPadRefreshes.removeAll(keepingCapacity: true)
+        // `update_panels` walks the panel stack and stages each panel's
+        // window — AND handles stdscr for us. Per the ncurses panel(3x)
+        // man page we must NOT call `wnoutrefresh(stdscr)` separately:
+        // doing so leaves stdscr's dirty-map in a state that prevents
+        // `update_panels` from repainting panel regions on top, so
+        // panel contents stay invisible. Trust update_panels.
+        tui_update_panels()
         _ = tui_doupdate()
     }
 
@@ -158,6 +188,8 @@ public final class NCursesScreen: Screen, @unchecked Sendable {
             init_pair(Int16(Color.selected.rawValue),Int16(COLOR_WHITE),   Int16(COLOR_BLUE))
             init_pair(Int16(Color.dim.rawValue),     Int16(COLOR_WHITE),   -1)
             init_pair(Int16(Color.magenta.rawValue), Int16(COLOR_MAGENTA), -1)
+            init_pair(Int16(Color.blue.rawValue),    Int16(COLOR_BLUE),    -1)
+            init_pair(Int16(Color.white.rawValue),   Int16(COLOR_WHITE),   -1)
         }
     }
 
@@ -308,6 +340,20 @@ public struct Term {
         // also be ≥ 32 so we don't misinterpret a legitimate `ESC a` =
         // Alt-a as a mouse event.
         if c1 != 91 {   // not '['
+            // Emacs / readline style word keys, which macOS Terminal and
+            // iTerm2 send for Option+Arrow by default (far more common on
+            // macOS than the xterm `ESC [1;3<letter>` form). Also handle
+            // Option+Backspace (ESC DEL) and Option+d (forward-kill-word).
+            switch c1 {
+            case 0x62:                      // 'b' — Option+Left / M-b
+                return .key(KEY_ALT_LEFT)
+            case 0x66:                      // 'f' — Option+Right / M-f
+                return .key(KEY_ALT_RIGHT)
+            case 0x7f, 0x08:                // DEL / BS — Option+Backspace
+                return .key(KEY_ALT_BACKSPACE)
+            default:
+                break
+            }
             // Fallback: if ncurses ate the `[M` prefix but we still got
             // the payload (happens with some ncurses/button-code combos),
             // treat an Cb-like byte as truncated X10.
@@ -349,7 +395,8 @@ public struct Term {
         case 70: return .key(Int32(KEY_END))    // 'F'
         default: break
         }
-        // Multi-byte CSI: `[5~` (PgUp), `[6~` (PgDn)
+        // Multi-byte CSI: `[5~` (PgUp), `[6~` (PgDn), and
+        // `[1;<mod><letter>` (modifier-arrow — we handle mod=3 = Option).
         if c2 >= 48 && c2 <= 57 {
             let c3 = screen.getch()
             if c3 == 126 {
@@ -357,6 +404,37 @@ public struct Term {
                 case 53: return .key(Int32(KEY_PPAGE))
                 case 54: return .key(Int32(KEY_NPAGE))
                 default: break
+                }
+            }
+            // `[1;<mod><letter>` — modifier-arrow. macOS Option+Arrow
+            // arrives as `ESC [1;3A/B/C/D`. Mod values from xterm's
+            // extended keys: 2=Shift, 3=Alt/Option, 4=Shift+Alt,
+            // 5=Ctrl, 7=Alt+Ctrl, etc. We only decode Option (mod=3)
+            // for the Option+Arrow word-nav case; other combos fall
+            // through as a bare arrow so the UI at least moves.
+            if c2 == 49, c3 == 59 {   // '1' then ';'
+                let cMod = screen.getch()
+                let cLetter = screen.getch()
+                guard cLetter != -1 else { return .none }
+                if cMod == 51 {   // '3' — Option
+                    switch cLetter {
+                    case 65: return .key(KEY_ALT_UP)
+                    case 66: return .key(KEY_ALT_DOWN)
+                    case 67: return .key(KEY_ALT_RIGHT)
+                    case 68: return .key(KEY_ALT_LEFT)
+                    default: break
+                    }
+                }
+                // Unknown modifier — emit the plain arrow so nav still
+                // works. Better than eating the keystroke silently.
+                switch cLetter {
+                case 65: return .key(Int32(KEY_UP))
+                case 66: return .key(Int32(KEY_DOWN))
+                case 67: return .key(Int32(KEY_RIGHT))
+                case 68: return .key(Int32(KEY_LEFT))
+                case 72: return .key(Int32(KEY_HOME))
+                case 70: return .key(Int32(KEY_END))
+                default: return .none
                 }
             }
         }

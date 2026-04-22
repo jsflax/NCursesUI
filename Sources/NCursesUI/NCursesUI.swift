@@ -450,33 +450,93 @@ public enum EitherView<T: View, F: View>: View, TransparentView {
 
 public struct Text: View, PrimitiveView {
     public typealias Body = Never
-    public let content: String
-    public var style: Style
-    public init(_ content: String, color: Color = .dim, bold: Bool = false) {
-        self.content = content
-        self.style = Style(color: color, bold: bold)
+
+    /// Styled segment of a Text. A plain `Text("hi")` has a single run;
+    /// concatenating with `+` produces a Text with multiple runs, each
+    /// retaining its own style. Internal — callers compose via `Text + Text`
+    /// and the public modifiers, they don't build Runs directly.
+    struct Run {
+        var content: String
+        var style: Style
     }
+
+    let runs: [Run]
+
+    public init(_ content: String) {
+        self.runs = [Run(content: content, style: Style())]
+    }
+
+    init(runs: [Run]) {
+        self.runs = runs
+    }
+
     public var body: Never { fatalError("Text has no body") }
 
-    public func color(_ c: Color) -> Text { var v = self; v.style.color = c; return v }
-    public func bold(_ b: Bool = true) -> Text { var v = self; v.style.bold = b; return v }
-    public func reverse(_ r: Bool = true) -> Text { var v = self; v.style.inverted = r; return v }
+    /// Back-compat accessor for the concatenated string (used by measuring /
+    /// diagnostics). Prefer the Text view itself; reading `.content` loses
+    /// any per-run style information.
+    public var content: String { runs.map(\.content).joined() }
+
+    /// Concatenate two Texts, preserving each side's run styles — analogous
+    /// to SwiftUI's `Text + Text`.
+    public static func + (lhs: Text, rhs: Text) -> Text {
+        Text(runs: lhs.runs + rhs.runs)
+    }
+
+    public func foregroundColor(_ c: Color) -> Text {
+        Text(runs: runs.map { var r = $0; r.style.color = c; return r })
+    }
+
+    public func bold(_ b: Bool = true) -> Text {
+        Text(runs: runs.map { var r = $0; r.style.bold = b; return r })
+    }
+
+    public func reverse(_ r: Bool = true) -> Text {
+        Text(runs: runs.map { var run = $0; run.style.inverted = r; return run })
+    }
 
     public func draw(in rect: Rect) {
         guard rect.width > 0, rect.height > 0 else { return }
-        let lines = Text.wrap(content, width: rect.width)
-        for (i, line) in lines.prefix(rect.height).enumerated() {
-            Term.put(rect.y + i, rect.x, line,
-                     color: style.color, bold: style.bold, inverted: style.inverted)
+        if runs.count <= 1 {
+            // Single-run fast path: preserve existing word-wrapped rendering.
+            let style = runs.first?.style ?? Style()
+            let text = runs.first?.content ?? ""
+            let lines = Text.wrap(text, width: rect.width)
+            for (i, line) in lines.prefix(rect.height).enumerated() {
+                Term.put(rect.y + i, rect.x, line,
+                         color: style.color, bold: style.bold, inverted: style.inverted)
+            }
+            return
+        }
+        // Multi-run: inline on a single line, truncated at rect.width. Word
+        // wrapping across styled run boundaries is intentionally out of scope
+        // — the common case (per-nick colored chat rows) is one line each,
+        // and the owning ScrollView handles the break between messages.
+        var x = rect.x
+        let maxX = rect.x + rect.width
+        for run in runs {
+            guard x < maxX else { break }
+            let available = maxX - x
+            let fit = run.content.prefix(available)
+            Term.put(rect.y, x, String(fit),
+                     color: run.style.color,
+                     bold: run.style.bold,
+                     inverted: run.style.inverted)
+            x += fit.count
         }
     }
+
     public func measure(children: [ViewNode], proposedWidth: Int) -> Size {
-        guard !content.isEmpty, proposedWidth > 0 else {
-            return Size(width: 0, height: content.isEmpty ? 0 : 1)
+        guard proposedWidth > 0 else { return Size(width: 0, height: 0) }
+        if runs.count <= 1 {
+            let text = runs.first?.content ?? ""
+            guard !text.isEmpty else { return Size(width: 0, height: 0) }
+            let lines = Text.wrap(text, width: proposedWidth)
+            let w = lines.map(\.count).max() ?? 0
+            return Size(width: min(w, proposedWidth), height: lines.count)
         }
-        let lines = Text.wrap(content, width: proposedWidth)
-        let w = lines.map(\.count).max() ?? 0
-        return Size(width: min(w, proposedWidth), height: lines.count)
+        let totalChars = runs.reduce(0) { $0 + $1.content.count }
+        return Size(width: min(totalChars, proposedWidth), height: totalChars > 0 ? 1 : 0)
     }
 
     /// Word-wrap `text` to lines of at most `width` columns. Breaks at spaces
@@ -1155,6 +1215,13 @@ public struct Binding<V> {
     }
 
     public var projectedValue: Binding<V> { self }
+
+    /// Read-only binding with a fixed value. Mirrors SwiftUI's
+    /// `Binding.constant`; useful as a default argument when a widget
+    /// doesn't need a settable binding (e.g. "always focused" TextField).
+    public static func constant(_ value: V) -> Binding<V> {
+        Binding(get: { value }, set: { _ in })
+    }
 }
 
 // MARK: - .onKeyPress modifier
@@ -1176,6 +1243,62 @@ public extension View {
         -> OnKeyPressModifier<Self>
     {
         OnKeyPressModifier(content: self, key: key, handler: { handler(); return true })
+    }
+}
+
+// MARK: - .background modifier
+
+/// Fills the rect occupied by `content` with a solid color pair BEFORE the
+/// content draws. Mirrors the shape of SwiftUI's `.background(_:)` for the
+/// limited palette we have. Passing `nil` is a no-op, which lets callers
+/// write `content.background(isSelected ? .selected : nil)` without a
+/// conditional branch on the view type.
+public struct BackgroundModifier<Content: View>: View, ContainerRendering {
+    public let color: Color?
+    public let content: Content
+    public var body: some View { content }
+
+    public func beforeChildren(children: [any ViewNode], in rect: Rect) {
+        guard let color, rect.width > 0, rect.height > 0 else { return }
+        for y in rect.y..<(rect.y + rect.height) {
+            Term.fill(y, rect.x, rect.width, color: color)
+        }
+    }
+}
+
+public extension View {
+    func background(_ color: Color?) -> BackgroundModifier<Self> {
+        BackgroundModifier(color: color, content: self)
+    }
+}
+
+// MARK: - .onSubmit modifier
+
+/// Fires `handler` when Enter (Return) is pressed and no inner view has
+/// consumed it. Shaped to match SwiftUI's `.onSubmit { ... }` so the caller
+/// reads the current selection / text from its own bindings rather than
+/// receiving an item argument. Attach to a `List` or `TextField` subtree:
+///
+///     List(items, selection: $selected) { item, sel in ... }
+///         .onSubmit {
+///             if let id = selected, let item = items.first(where: { $0.id == id }) {
+///                 // ...
+///             }
+///         }
+public struct OnSubmitModifier<Content: View>: View, KeyHandling {
+    public let content: Content
+    public let handler: () -> Void
+    public var body: some View { content }
+    public func handles(_ ch: Int32) -> Bool { ch == 10 || ch == 13 }
+    public func handleKey(_ ch: Int32) -> Bool {
+        handler()
+        return true
+    }
+}
+
+public extension View {
+    func onSubmit(_ handler: @escaping () -> Void) -> OnSubmitModifier<Self> {
+        OnSubmitModifier(content: self, handler: handler)
     }
 }
 
