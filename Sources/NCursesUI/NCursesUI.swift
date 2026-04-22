@@ -1288,8 +1288,18 @@ public extension View {
 public struct OnSubmitModifier<Content: View>: View, KeyHandling {
     public let content: Content
     public let handler: () -> Void
+    /// When non-nil, the modifier only claims Enter while the binding
+    /// reads `true`. Lets callers with Tab-cycled focus gate Enter to
+    /// one region so keys bubble to sibling handlers otherwise. `nil`
+    /// preserves the original always-claim behavior.
+    public let isFocused: Binding<Bool>?
+
     public var body: some View { content }
-    public func handles(_ ch: Int32) -> Bool { ch == 10 || ch == 13 }
+    public func handles(_ ch: Int32) -> Bool {
+        guard ch == 10 || ch == 13 else { return false }
+        if let isFocused { return isFocused.wrappedValue }
+        return true
+    }
     public func handleKey(_ ch: Int32) -> Bool {
         handler()
         return true
@@ -1298,7 +1308,17 @@ public struct OnSubmitModifier<Content: View>: View, KeyHandling {
 
 public extension View {
     func onSubmit(_ handler: @escaping () -> Void) -> OnSubmitModifier<Self> {
-        OnSubmitModifier(content: self, handler: handler)
+        OnSubmitModifier(content: self, handler: handler, isFocused: nil)
+    }
+
+    /// Focus-gated variant: `handles(Enter)` returns `true` only while
+    /// `isFocused.wrappedValue` is `true`. Use when the parent view
+    /// Tab-cycles between regions and each region owns its own Enter.
+    func onSubmit(
+        isFocused: Binding<Bool>,
+        _ handler: @escaping () -> Void
+    ) -> OnSubmitModifier<Self> {
+        OnSubmitModifier(content: self, handler: handler, isFocused: isFocused)
     }
 }
 
