@@ -847,12 +847,18 @@ public struct ScrollView<Content: View>: View, ContainerRendering, KeyHandling, 
               let child = children.first else { return }
         let padWidth = rect.width - Self.scrollbarCols
         // Measure the child up front so we know its real content height for
-        // this frame. Sizing the pad to exactly that height means no blank
-        // rows at the bottom for short content, and no truncation for long.
+        // this frame. Pad must be AT LEAST the viewport height, even if the
+        // content is smaller — `pnoutrefresh` requires the source pad region
+        // (sy2-sy1 rows) to fit inside the pad's real size. If the pad is
+        // shorter than the requested blit region, ncurses truncates silently
+        // and the target region doesn't get redrawn → existing stdscr cells
+        // from the previous frame (or garbage after an overlay dismissed)
+        // remain on screen.
         let contentH = max(1, child.measure(proposedWidth: padWidth).height)
+        let padHeight = max(contentH, rect.height)
         box.lastContentHeight = contentH
         box.lastPadWidth = padWidth
-        let pad = box.sizedPad(width: padWidth, height: contentH)
+        let pad = box.sizedPad(width: padWidth, height: padHeight)
         _ = tui_werase(pad.handle)
         Term.pushTarget(pad.handle)
     }

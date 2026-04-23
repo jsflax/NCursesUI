@@ -137,20 +137,23 @@ public final class NCursesScreen: Screen, @unchecked Sendable {
     }
 
     public func flush() {
-        // Pad blits go first — they write directly into the virtual screen
-        // at their target region. Safe to interleave with panels since
-        // `update_panels` (below) will paint panel cells on top.
+        // `update_panels` walks the panel stack and stages each panel's
+        // window — AND handles stdscr for us via `wnoutrefresh(stdscr)`.
+        // Per the ncurses panel(3x) man page we must NOT call
+        // `wnoutrefresh(stdscr)` separately: doing so leaves stdscr's
+        // dirty-map in a state that prevents `update_panels` from
+        // repainting panel regions on top, so panel contents stay
+        // invisible. Trust update_panels.
+        tui_update_panels()
+        // Pad blits go AFTER update_panels so they override stdscr's
+        // (blank) staging in the ScrollView region. Doing them before
+        // meant update_panels' internal `wnoutrefresh(stdscr)` would
+        // overwrite the pnoutrefresh'd cells with stdscr's empty ones,
+        // and the pad content would never reach the physical screen.
         for r in pendingPadRefreshes {
             _ = tui_pnoutrefresh(r.pad, r.padY, r.padX, r.sy1, r.sx1, r.sy2, r.sx2)
         }
         pendingPadRefreshes.removeAll(keepingCapacity: true)
-        // `update_panels` walks the panel stack and stages each panel's
-        // window — AND handles stdscr for us. Per the ncurses panel(3x)
-        // man page we must NOT call `wnoutrefresh(stdscr)` separately:
-        // doing so leaves stdscr's dirty-map in a state that prevents
-        // `update_panels` from repainting panel regions on top, so
-        // panel contents stay invisible. Trust update_panels.
-        tui_update_panels()
         _ = tui_doupdate()
     }
 
