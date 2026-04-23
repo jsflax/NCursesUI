@@ -137,19 +137,20 @@ public final class NCursesScreen: Screen, @unchecked Sendable {
     }
 
     public func flush() {
-        // `update_panels` walks the panel stack and stages each panel's
-        // window — AND handles stdscr for us via `wnoutrefresh(stdscr)`.
-        // Per the ncurses panel(3x) man page we must NOT call
-        // `wnoutrefresh(stdscr)` separately: doing so leaves stdscr's
-        // dirty-map in a state that prevents `update_panels` from
-        // repainting panel regions on top, so panel contents stay
-        // invisible. Trust update_panels.
+        // Order per `panel(3x)` man page: stage all non-panel windows
+        // first (stdscr here — nothing else), then `update_panels()`
+        // stages each panel's window on top with the correct z-order.
+        //
+        // Empirically: if `wnoutrefresh(stdscr)` is skipped entirely,
+        // `update_panels()` does NOT stage stdscr on its own when there
+        // are zero live panels. That leaves stdscr (status bar, input,
+        // dividers) either stale or unstaged, and any pad blit that
+        // lands on top of a stale stdscr region composes incorrectly —
+        // the ScrollView content looks invisible in that case.
+        _ = wnoutrefresh(tui_stdscr())
         tui_update_panels()
-        // Pad blits go AFTER update_panels so they override stdscr's
-        // (blank) staging in the ScrollView region. Doing them before
-        // meant update_panels' internal `wnoutrefresh(stdscr)` would
-        // overwrite the pnoutrefresh'd cells with stdscr's empty ones,
-        // and the pad content would never reach the physical screen.
+        // Pad blits go LAST so they override whatever stdscr staged in
+        // the ScrollView region.
         for r in pendingPadRefreshes {
             _ = tui_pnoutrefresh(r.pad, r.padY, r.padX, r.sy1, r.sx1, r.sy2, r.sx2)
         }
