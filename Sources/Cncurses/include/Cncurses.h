@@ -17,6 +17,19 @@ static inline int tui_a_normal(void)    { return (int)A_NORMAL; }
 // COLOR_PAIR macro
 static inline int tui_color_pair(int n) { return (int)COLOR_PAIR(n); }
 
+// Custom color definition (for palette RGB registration). Scale is 0..1000.
+// `can_change_color` reports whether init_color is usable. Most modern
+// terminals (Terminal.app, iTerm2, kitty) support it with TERM=xterm-256color.
+static inline int tui_can_change_color(void) { return can_change_color() ? 1 : 0; }
+static inline int tui_init_color(int idx, int r, int g, int b) {
+    return init_color((short)idx, (short)r, (short)g, (short)b);
+}
+static inline int tui_init_pair(int pair, int fg, int bg) {
+    return init_pair((short)pair, (short)fg, (short)bg);
+}
+static inline int tui_colors(void) { return COLORS; }
+static inline int tui_color_pairs(void) { return COLOR_PAIRS; }
+
 // Screen dimensions (LINES/COLS are macros or extern globals)
 static inline int tui_lines(void) { return LINES; }
 static inline int tui_cols(void)  { return COLS; }

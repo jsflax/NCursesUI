@@ -192,6 +192,11 @@ public final class NCursesScreen: Screen, @unchecked Sendable {
             init_pair(Int16(Color.magenta.rawValue), Int16(COLOR_MAGENTA), -1)
             init_pair(Int16(Color.blue.rawValue),    Int16(COLOR_BLUE),    -1)
             init_pair(Int16(Color.white.rawValue),   Int16(COLOR_WHITE),   -1)
+
+            // Register the default palette so Palette-driven views have pairs
+            // available from frame 1. Apps that want a different palette call
+            // `PaletteRegistrar.activate(_:)` after `setup()`.
+            PaletteRegistrar.activate(.phosphor)
         }
     }
 
