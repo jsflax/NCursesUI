@@ -210,6 +210,11 @@ public struct Style {
     public var color: Color = .dim
     public var bold: Bool = false
     public var inverted: Bool = false
+    /// Palette-role pair ID override. When non-nil, wins over `color`
+    /// — the run renders with the active palette's concrete RGB for
+    /// that semantic slot instead of the legacy 9-slot `Color` enum.
+    /// Set by `Text.foregroundColor(_ role: Palette.Role)`.
+    public var palettePair: Int32? = nil
     public init(color: Color = .dim, bold: Bool = false, inverted: Bool = false) {
         self.color = color; self.bold = bold; self.inverted = inverted
     }
@@ -484,7 +489,25 @@ public struct Text: View, PrimitiveView {
     }
 
     public func foregroundColor(_ c: Color) -> Text {
-        Text(runs: runs.map { var r = $0; r.style.color = c; return r })
+        Text(runs: runs.map {
+            var r = $0
+            r.style.color = c
+            // Legacy color explicit — clear any palette override so
+            // the call-site intent wins.
+            r.style.palettePair = nil
+            return r
+        })
+    }
+
+    /// Paint this Text in the active palette's concrete RGB for the
+    /// given semantic role. Separate method from `foregroundColor(_:)`
+    /// because `Color.dim` and `Palette.Role.dim` share names — one
+    /// call-site dot-syntax would be ambiguous otherwise.
+    /// Callers pinned to the legacy 9-slot enum keep using
+    /// `foregroundColor(_:)`; palette-driven views use this.
+    public func paletteColor(_ role: Palette.Role) -> Text {
+        let pair = PaletteRegistrar.pairId(for: role)
+        return Text(runs: runs.map { var r = $0; r.style.palettePair = pair; return r })
     }
 
     public func bold(_ b: Bool = true) -> Text {
@@ -503,8 +526,7 @@ public struct Text: View, PrimitiveView {
             let text = runs.first?.content ?? ""
             let lines = Text.wrap(text, width: rect.width)
             for (i, line) in lines.prefix(rect.height).enumerated() {
-                Term.put(rect.y + i, rect.x, line,
-                         color: style.color, bold: style.bold, inverted: style.inverted)
+                Self.drawStyled(line, y: rect.y + i, x: rect.x, style: style)
             }
             return
         }
@@ -518,12 +540,23 @@ public struct Text: View, PrimitiveView {
             guard x < maxX else { break }
             let available = maxX - x
             let fit = run.content.prefix(available)
-            Term.put(rect.y, x, String(fit),
-                     color: run.style.color,
-                     bold: run.style.bold,
-                     inverted: run.style.inverted)
+            Self.drawStyled(String(fit), y: rect.y, x: x, style: run.style)
             x += fit.count
         }
+    }
+
+    /// Resolve a styled run to concrete ncurses attrs and emit. When
+    /// `style.palettePair` is set, it wins over the legacy `style.color`
+    /// pair; otherwise this matches `Term.put(..., color:)`.
+    private static func drawStyled(_ s: String, y: Int, x: Int, style: Style) {
+        let pairId = style.palettePair ?? style.color.rawValue
+        var attrs = tui_color_pair(pairId)
+        if style.bold { attrs |= tui_a_bold() }
+        if style.inverted { attrs |= tui_a_reverse() }
+        Term.screen.attron(attrs)
+        Term.screen.move(Int32(y), Int32(x))
+        Term.screen.addstr(s)
+        Term.screen.attroff(attrs)
     }
 
     public func measure(children: [ViewNode], proposedWidth: Int) -> Size {
