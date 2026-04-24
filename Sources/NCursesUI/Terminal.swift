@@ -76,6 +76,19 @@ public let KEY_ALT_LEFT:  Int32 = 0x403
 /// Option+Backspace — many macOS terminals send `ESC DEL` (ESC + 0x7f).
 public let KEY_ALT_BACKSPACE: Int32 = 0x404
 
+/// Option+1 through Option+9. When a terminal has "Use Option as Meta"
+/// enabled, Alt+digit arrives as `ESC <digit>`; decoded in
+/// `decodeAfterEsc`. Used by app-level session switchers.
+public let KEY_ALT_1: Int32 = 0x411
+public let KEY_ALT_2: Int32 = 0x412
+public let KEY_ALT_3: Int32 = 0x413
+public let KEY_ALT_4: Int32 = 0x414
+public let KEY_ALT_5: Int32 = 0x415
+public let KEY_ALT_6: Int32 = 0x416
+public let KEY_ALT_7: Int32 = 0x417
+public let KEY_ALT_8: Int32 = 0x418
+public let KEY_ALT_9: Int32 = 0x419
+
 // MARK: - NCursesScreen (production)
 //
 // Class (was struct) because the draw-target stack is mutable per-frame and
@@ -358,6 +371,8 @@ public struct Term {
                 return .key(KEY_ALT_RIGHT)
             case 0x7f, 0x08:                // DEL / BS — Option+Backspace
                 return .key(KEY_ALT_BACKSPACE)
+            case 0x31...0x39:               // '1'..'9' — Option+<digit>
+                return .key(KEY_ALT_1 + (c1 - 0x31))
             default:
                 break
             }
