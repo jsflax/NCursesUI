@@ -530,14 +530,25 @@ public struct Text: View, PrimitiveView {
             }
             return
         }
-        // Multi-run wrapping: greedy space-delimited breaks across
-        // run boundaries. Preserves per-run styling on each emitted
-        // word. A word entirely inside one run renders with that
-        // run's style; a line break between two runs causes the
-        // second run's first word to flow onto the next line in its
-        // own style. This gives chat rows like `<@claude> long
-        // response text` the expected wrap behaviour instead of
-        // truncating at the center-pane edge.
+        // Multi-run fast path: when the total width fits on one line
+        // and there are no embedded newlines, emit runs sequentially
+        // without allocating a per-char `cells` array. Covers
+        // TextField cursor-splits + typical short chat headers
+        // (`HH:MM <nick> body`). Avoids the general-case
+        // char-by-char scan that had observable lag on high-frequency
+        // redraws (typing).
+        let totalChars = runs.reduce(0) { $0 + $1.content.count }
+        let hasNewline = runs.contains(where: { $0.content.contains("\n") })
+        if !hasNewline, totalChars <= rect.width {
+            var x = rect.x
+            for run in runs {
+                let s = run.content
+                Self.drawStyled(s, y: rect.y, x: x, style: run.style)
+                x += s.count
+            }
+            return
+        }
+        // General case — wrap across run boundaries.
         drawMultiRun(in: rect)
     }
 
@@ -663,10 +674,17 @@ public struct Text: View, PrimitiveView {
             let w = lines.map(\.count).max() ?? 0
             return Size(width: min(w, proposedWidth), height: lines.count)
         }
-        // Multi-run: simulate the same word-wrap the draw path uses
-        // so height reflects the actual rendered line count. Without
-        // this, ScrollView / VStack reserve only 1 row for long
-        // claude replies and the pad clips the overflow.
+        // Multi-run fast path — sum of run widths fits on one line
+        // and there are no embedded newlines. Cheap to check, avoids
+        // calling the full wrap algorithm on every frame for
+        // TextField cursor-splits and short chat headers.
+        let totalChars = runs.reduce(0) { $0 + $1.content.count }
+        let hasNewline = runs.contains(where: { $0.content.contains("\n") })
+        if !hasNewline, totalChars <= proposedWidth {
+            return Size(width: totalChars, height: totalChars > 0 ? 1 : 0)
+        }
+        // General case: simulate the same word-wrap the draw path
+        // uses so height reflects the actual rendered line count.
         let flattened = runs.map(\.content).joined()
         guard !flattened.isEmpty else { return Size(width: 0, height: 0) }
         let lines = Text.wrap(flattened, width: proposedWidth)
@@ -711,6 +729,30 @@ public struct HLineView: View, PrimitiveView {
     public func draw(in rect: Rect) { Term.hline(rect.y, rect.x, rect.width) }
     public func measure(children: [ViewNode], proposedWidth: Int) -> Size {
         Size(width: proposedWidth, height: 1)
+    }
+}
+
+/// One-column vertical rule, drawn at `rect.height` rows using `│`.
+/// Measured width = 1; lets an HStack claim a single column for a
+/// divider that spans the pane's full height (vs. `Text("│")` which
+/// is 1×1).
+public struct VLineView: View, PrimitiveView {
+    public typealias Body = Never
+    public init() {}
+    public var body: Never { fatalError("VLineView has no body") }
+    public func draw(in rect: Rect) {
+        guard rect.width > 0 else { return }
+        for row in 0..<rect.height {
+            Term.put(rect.y + row, rect.x, "│",
+                     color: .dim, bold: false, inverted: false)
+        }
+    }
+    public func measure(children: [ViewNode], proposedWidth: Int) -> Size {
+        // Flex-less height — parent HStack hands us its rect height
+        // via `childRects` regardless of our measure.height, so we
+        // report 1 here and the HStack vertically fills us to its own
+        // rect height anyway (that's how HStack treats all children).
+        Size(width: 1, height: 1)
     }
 }
 
