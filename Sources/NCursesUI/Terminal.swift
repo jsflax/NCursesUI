@@ -137,24 +137,22 @@ public final class NCursesScreen: Screen, @unchecked Sendable {
     }
 
     public func flush() {
-        // Order per `panel(3x)` man page: stage all non-panel windows
-        // first (stdscr here — nothing else), then `update_panels()`
-        // stages each panel's window on top with the correct z-order.
+        // Order: stdscr → pads → panels. `wnoutrefresh` / `pnoutrefresh`
+        // both stage into ncurses's virtual screen; later stagings win
+        // where they overlap. Pads must come BEFORE `update_panels()`
+        // so an overlay panel composes on top of a ScrollView pad —
+        // otherwise the pad blit overwrites the overlay in any
+        // intersecting region and the overlay looks invisible.
         //
-        // Empirically: if `wnoutrefresh(stdscr)` is skipped entirely,
-        // `update_panels()` does NOT stage stdscr on its own when there
-        // are zero live panels. That leaves stdscr (status bar, input,
-        // dividers) either stale or unstaged, and any pad blit that
-        // lands on top of a stale stdscr region composes incorrectly —
-        // the ScrollView content looks invisible in that case.
+        // stdscr first because `update_panels()` doesn't stage stdscr
+        // when there are zero live panels, and a pad blit landing on
+        // a stale stdscr region composes incorrectly.
         _ = wnoutrefresh(tui_stdscr())
-        tui_update_panels()
-        // Pad blits go LAST so they override whatever stdscr staged in
-        // the ScrollView region.
         for r in pendingPadRefreshes {
             _ = tui_pnoutrefresh(r.pad, r.padY, r.padX, r.sy1, r.sx1, r.sy2, r.sx2)
         }
         pendingPadRefreshes.removeAll(keepingCapacity: true)
+        tui_update_panels()
         _ = tui_doupdate()
     }
 
@@ -397,6 +395,7 @@ public struct Term {
         case 68: return .key(Int32(KEY_LEFT))   // 'D'
         case 72: return .key(Int32(KEY_HOME))   // 'H'
         case 70: return .key(Int32(KEY_END))    // 'F'
+        case 90: return .key(Int32(KEY_BTAB))   // 'Z' — Shift-Tab
         default: break
         }
         // Multi-byte CSI: `[5~` (PgUp), `[6~` (PgDn), and

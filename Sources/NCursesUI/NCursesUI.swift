@@ -1,6 +1,6 @@
 import Foundation
 import Observation
-import Cncurses
+@_exported import Cncurses
 import Combine
 import os
 

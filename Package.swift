@@ -9,6 +9,7 @@ let package = Package(
         .library(name: "NCursesUI", targets: ["NCursesUI"]),
         .library(name: "Cncurses", targets: ["Cncurses"]),
         .executable(name: "WidgetsDemo", targets: ["WidgetsDemo"]),
+        .executable(name: "OverlayTaskRepro", targets: ["OverlayTaskRepro"]),
     ],
     dependencies: [
         .package(url: "https://github.com/apple/swift-log", from: "1.6.0"),
@@ -36,6 +37,11 @@ let package = Package(
             name: "WidgetsDemo",
             dependencies: ["NCursesUI"],
             path: "Examples/WidgetsDemo"
+        ),
+        .executableTarget(
+            name: "OverlayTaskRepro",
+            dependencies: ["NCursesUI"],
+            path: "Examples/OverlayTaskRepro"
         ),
     ]
 )
