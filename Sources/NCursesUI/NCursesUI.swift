@@ -530,19 +530,114 @@ public struct Text: View, PrimitiveView {
             }
             return
         }
-        // Multi-run: inline on a single line, truncated at rect.width. Word
-        // wrapping across styled run boundaries is intentionally out of scope
-        // — the common case (per-nick colored chat rows) is one line each,
-        // and the owning ScrollView handles the break between messages.
-        var x = rect.x
-        let maxX = rect.x + rect.width
+        // Multi-run wrapping: greedy space-delimited breaks across
+        // run boundaries. Preserves per-run styling on each emitted
+        // word. A word entirely inside one run renders with that
+        // run's style; a line break between two runs causes the
+        // second run's first word to flow onto the next line in its
+        // own style. This gives chat rows like `<@claude> long
+        // response text` the expected wrap behaviour instead of
+        // truncating at the center-pane edge.
+        drawMultiRun(in: rect)
+    }
+
+    /// Word-wrap styled multi-run Text. Runs contribute to a single
+    /// flat character stream — each char carries its source run's
+    /// style. The wrap algorithm sees the stream exactly as if it
+    /// were one paragraph of text (so `<nick> long body` wraps the
+    /// body onto new rows without losing per-run styling), and
+    /// mid-word style changes (e.g. TextField's cursor-reverse on
+    /// one char) are rendered inline without inserting spaces.
+    private func drawMultiRun(in rect: Rect) {
+        // Flatten to (char, style) pairs with indices marking the
+        // boundary between "word" and "separator" chars — words
+        // are any non-space non-newline runs, separators are space/
+        // newline. Newlines are preserved as paragraph breaks.
+        struct Cell { let ch: Character; let style: Style }
+        var cells: [Cell] = []
+        cells.reserveCapacity(runs.reduce(0) { $0 + $1.content.count })
         for run in runs {
-            guard x < maxX else { break }
-            let available = maxX - x
-            let fit = run.content.prefix(available)
-            Self.drawStyled(String(fit), y: rect.y, x: x, style: run.style)
-            x += fit.count
+            for ch in run.content {
+                cells.append(Cell(ch: ch, style: run.style))
+            }
         }
+        guard !cells.isEmpty else { return }
+
+        let width = rect.width
+        let maxY = rect.y + rect.height
+        var y = rect.y
+        var x = rect.x
+        var lineStart = 0        // index into cells where current row starts
+        var lastSpace: Int? = nil // last space index on current row (wrap point)
+        var i = 0
+
+        @inline(__always) func flush(through endExclusive: Int) {
+            // Emit cells [lineStart, endExclusive) — merge consecutive
+            // same-style runs so drawStyled is called with longer
+            // strings instead of one call per char.
+            var runStart = lineStart
+            while runStart < endExclusive {
+                let startStyle = cells[runStart].style
+                var runEnd = runStart + 1
+                while runEnd < endExclusive,
+                      stylesEqual(cells[runEnd].style, startStyle) {
+                    runEnd += 1
+                }
+                let s = String(cells[runStart..<runEnd].map(\.ch))
+                Self.drawStyled(s, y: y, x: x, style: startStyle)
+                x += runEnd - runStart
+                runStart = runEnd
+            }
+        }
+
+        @inline(__always) func newline(after endExclusive: Int, nextStart: Int) {
+            flush(through: endExclusive)
+            y += 1
+            x = rect.x
+            lineStart = nextStart
+            lastSpace = nil
+        }
+
+        while i < cells.count, y < maxY {
+            let ch = cells[i].ch
+            if ch == "\n" {
+                // Hard break: emit up to (but not including) this
+                // newline, advance past it on the next row.
+                newline(after: i, nextStart: i + 1)
+                i += 1
+                continue
+            }
+            let columnsUsed = i - lineStart
+            if columnsUsed >= width {
+                // Overflow. Prefer wrapping at `lastSpace` if we
+                // had one on this row; else hard-break at i.
+                if let sp = lastSpace, sp > lineStart {
+                    newline(after: sp, nextStart: sp + 1)
+                    // Re-scan the word after the space at the
+                    // start of the new row.
+                    // i stays put — we'll re-evaluate from sp+1.
+                    // Reset only if lineStart jumped past i.
+                    if lineStart > i { i = lineStart }
+                } else {
+                    newline(after: i, nextStart: i)
+                }
+                continue
+            }
+            if ch == " " {
+                lastSpace = i
+            }
+            i += 1
+        }
+        // Tail — emit whatever's left on the last row.
+        if y < maxY, lineStart < cells.count {
+            flush(through: cells.count)
+        }
+    }
+
+    @inline(__always)
+    private func stylesEqual(_ a: Style, _ b: Style) -> Bool {
+        a.color == b.color && a.bold == b.bold
+            && a.inverted == b.inverted && a.palettePair == b.palettePair
     }
 
     /// Resolve a styled run to concrete ncurses attrs and emit. When
@@ -568,8 +663,15 @@ public struct Text: View, PrimitiveView {
             let w = lines.map(\.count).max() ?? 0
             return Size(width: min(w, proposedWidth), height: lines.count)
         }
-        let totalChars = runs.reduce(0) { $0 + $1.content.count }
-        return Size(width: min(totalChars, proposedWidth), height: totalChars > 0 ? 1 : 0)
+        // Multi-run: simulate the same word-wrap the draw path uses
+        // so height reflects the actual rendered line count. Without
+        // this, ScrollView / VStack reserve only 1 row for long
+        // claude replies and the pad clips the overflow.
+        let flattened = runs.map(\.content).joined()
+        guard !flattened.isEmpty else { return Size(width: 0, height: 0) }
+        let lines = Text.wrap(flattened, width: proposedWidth)
+        let w = lines.map(\.count).max() ?? 0
+        return Size(width: min(w, proposedWidth), height: lines.count)
     }
 
     /// Word-wrap `text` to lines of at most `width` columns. Breaks at spaces
