@@ -1311,6 +1311,53 @@ public extension View {
     }
 }
 
+// MARK: - .frame modifier
+//
+// Pins a view's measured width (and optionally height) to a fixed
+// value, regardless of the child's natural size. Used to build
+// flex-less layouts where the caller knows the exact widths each
+// region should occupy — e.g. an IRC-style three-column layout where
+// sidebars get fixed widths and the center pane gets the residual.
+//
+// The child is passed that pinned rect verbatim; inner content
+// word-wraps / clips to it. Passing a width larger than the child's
+// natural size leaves empty space at the right (same visual you'd
+// get from a SwiftUI `.frame(width:, alignment: .leading)`).
+
+public struct FrameModifier<Content: View>: View {
+    public let content: Content
+    public let width: Int?
+    public let height: Int?
+    public var body: some View { content }
+
+    public func measure(children: [ViewNode], proposedWidth: Int) -> Size {
+        // Child is our single mounted child. Ask it to measure at
+        // our pinned width so it can word-wrap properly.
+        let childProposed = width ?? proposedWidth
+        let childSize = children.first?.measure(proposedWidth: childProposed)
+            ?? Size(width: 0, height: 0)
+        return Size(
+            width: width ?? childSize.width,
+            height: height ?? childSize.height)
+    }
+
+    public func childRects(children: [ViewNode], in rect: Rect) -> [Rect] {
+        // Lay the child inside the pinned rect — its draw sees the
+        // exact rect we advertise via measure.
+        children.map { _ in rect }
+    }
+}
+
+public extension View {
+    /// Pin this view's measured width (and/or height) to a fixed value.
+    /// Callers in flex-less contexts (NCursesUI's HStack / VStack) use
+    /// this to reserve exact space — e.g. `sidebar.frame(width: 24)`
+    /// in a 3-column layout.
+    func frame(width: Int? = nil, height: Int? = nil) -> FrameModifier<Self> {
+        FrameModifier(content: self, width: width, height: height)
+    }
+}
+
 // MARK: - .onSubmit modifier
 
 /// Fires `handler` when Enter (Return) is pressed and no inner view has
