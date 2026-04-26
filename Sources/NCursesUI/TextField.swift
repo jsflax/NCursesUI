@@ -76,9 +76,9 @@ public struct TextField: View, KeyHandling {
         }
         let cursorRender: Text = {
             switch blinkFrame {
-            case 0, 4: return Text(cursorChar)                              // empty
-            case 1, 3: return Text(cursorChar).reverse().foregroundColor(.dim) // dim
-            default:   return Text(cursorChar).reverse()                    // full
+            case 0, 4: return Text(cursorChar)                       // empty
+            case 1, 3: return Text(cursorChar).reverse().dim()       // faded reverse
+            default:   return Text(cursorChar).reverse()             // solid reverse
             }
         }()
         return Text(before) + cursorRender + Text(after)

@@ -14,6 +14,28 @@ static inline int tui_a_reverse(void)   { return (int)A_REVERSE; }
 static inline int tui_a_underline(void) { return (int)A_UNDERLINE; }
 static inline int tui_a_normal(void)    { return (int)A_NORMAL; }
 
+// A_ITALIC was added in ncurses 5.9 (2011). macOS system ncurses 5.7 and
+// some embedded builds predate it; fall back to a hardcoded NCURSES_BITS
+// (1U,23) — the same bit position 6.x uses. If terminfo's `sitm` is
+// missing the bit silently no-ops at draw time (ncurses skips emitting
+// SGR 3), so this is safe; callers should consult tui_has_italic().
+#ifdef A_ITALIC
+static inline int tui_a_italic(void)    { return (int)A_ITALIC; }
+#else
+static inline int tui_a_italic(void)    { return (int)((1U) << (23 + 8)); }
+#endif
+
+// Probe terminfo for italic-on (`sitm`) capability. Use at startup to
+// decide whether italic should fall back to underline. Cached by callers.
+// Note: `tigetstr` returns (char *)-1 for invalid names and NULL for
+// terminfo entries that don't define the cap — we treat both as "no".
+#include <term.h>
+static inline int tui_has_italic_cap(void) {
+    char name[5] = {'s', 'i', 't', 'm', 0};
+    char *s = tigetstr(name);
+    return (s != NULL && s != (char *)-1) ? 1 : 0;
+}
+
 // COLOR_PAIR macro
 static inline int tui_color_pair(int n) { return (int)COLOR_PAIR(n); }
 

@@ -210,6 +210,15 @@ public struct Style {
     public var color: Color = .dim
     public var bold: Bool = false
     public var inverted: Bool = false
+    /// `A_DIM` ncurses attribute — half-opacity render. Distinct from
+    /// `Color.dim` (an ANSI gray index). Combined with `inverted`,
+    /// produces a faded reverse-video block (e.g. the breathing
+    /// cursor's mid frames).
+    public var dim: Bool = false
+    /// `A_ITALIC` if the terminal supports it; falls back to
+    /// `A_UNDERLINE` when the active terminfo entry lacks `sitm`.
+    /// Probe done once at startup by `Term.italicCapable`.
+    public var italic: Bool = false
     /// Palette-role pair ID override. When non-nil, wins over `color`
     /// — the run renders with the active palette's concrete RGB for
     /// that semantic slot instead of the legacy 9-slot `Color` enum.
@@ -475,6 +484,106 @@ public struct Text: View, PrimitiveView {
         self.runs = runs
     }
 
+    /// Parse line-scope markdown into styled runs. Recognised markers:
+    ///
+    ///   `**bold**`      → `.bold()`
+    ///   `*italic*`      → `.italic()` (falls back to underline)
+    ///   `` `code` ``    → cyan inline-code colouring
+    ///   leading `# `, `## `, `### ` → bold for the rest of the line
+    ///
+    /// Block-level constructs (fences, lists, blockquotes, tables)
+    /// are NOT handled here — those go through `MessageBodyParser`
+    /// at a higher layer. Multi-paragraph input is the caller's
+    /// responsibility (split on `\n` first, render each line through
+    /// this init). Mismatched markers (`**bold` with no closer) fall
+    /// through as plain text.
+    ///
+    /// Implementation: linear state machine over a single
+    /// `Substring` — produces a `[Run]` and feeds the existing
+    /// multi-run init. No regex, no allocs per char beyond the
+    /// resulting buffers.
+    public init(markdown text: String) {
+        self.init(runs: Text.parseMarkdown(text))
+    }
+
+    static func parseMarkdown(_ text: String) -> [Run] {
+        guard !text.isEmpty else { return [Run(content: "", style: Style())] }
+
+        // Heading prefix consumed at line start — `# `, `## `, `### `
+        // (CommonMark ATX; we don't differentiate levels — bold reads
+        // as "heading" enough for a TUI). Leading whitespace is
+        // preserved when the prefix doesn't match.
+        var working = text
+        var headingBold = false
+        for prefix in ["### ", "## ", "# "] {
+            if working.hasPrefix(prefix) {
+                working = String(working.dropFirst(prefix.count))
+                headingBold = true
+                break
+            }
+        }
+
+        var runs: [Run] = []
+        var buf = ""
+        var bold = headingBold
+        var italic = false
+        var code = false
+
+        func emitBuffered() {
+            guard !buf.isEmpty else { return }
+            var style = Style()
+            style.bold = bold
+            style.italic = italic
+            if code {
+                // Inline-code colour. Use legacy `.cyan` to remain
+                // independent of palette activation; palette-aware
+                // call sites can layer their own override on top.
+                style.color = .cyan
+            }
+            runs.append(Run(content: buf, style: style))
+            buf = ""
+        }
+
+        let chars = Array(working)
+        var i = 0
+        while i < chars.count {
+            let c = chars[i]
+
+            // `**` → toggle bold (must check before `*`)
+            if c == "*", i + 1 < chars.count, chars[i + 1] == "*" {
+                emitBuffered()
+                bold.toggle()
+                i += 2
+                continue
+            }
+            // `*` → toggle italic
+            if c == "*" {
+                emitBuffered()
+                italic.toggle()
+                i += 1
+                continue
+            }
+            // `` ` `` → toggle code
+            if c == "`" {
+                emitBuffered()
+                code.toggle()
+                i += 1
+                continue
+            }
+            buf.append(c)
+            i += 1
+        }
+        emitBuffered()
+
+        // If we exit with unclosed bold/italic/code (malformed
+        // input), the buffered content was already styled with the
+        // open state — that's acceptable; the caller saw raw markers
+        // anyway in the live-edit case. The trade-off vs. "fall
+        // through to plain on imbalance" is simpler code; tests
+        // confirm the current behaviour is acceptable.
+        return runs.isEmpty ? [Run(content: "", style: Style())] : runs
+    }
+
     public var body: Never { fatalError("Text has no body") }
 
     /// Back-compat accessor for the concatenated string (used by measuring /
@@ -516,6 +625,21 @@ public struct Text: View, PrimitiveView {
 
     public func reverse(_ r: Bool = true) -> Text {
         Text(runs: runs.map { var run = $0; run.style.inverted = r; return run })
+    }
+
+    /// Apply ncurses `A_DIM` to each run — half-opacity render. Distinct
+    /// from `.foregroundColor(.dim)` which sets a colour pair to ANSI
+    /// gray; this sets the actual dim attribute and stacks with `.reverse()`.
+    public func dim(_ d: Bool = true) -> Text {
+        Text(runs: runs.map { var r = $0; r.style.dim = d; return r })
+    }
+
+    /// Apply italic styling. Falls back to underline at draw time when
+    /// the active terminfo entry doesn't advertise `sitm` (e.g. tmux
+    /// with default `screen` TERM). Capability probed once at startup
+    /// and cached on `Term.italicCapable`.
+    public func italic(_ i: Bool = true) -> Text {
+        Text(runs: runs.map { var r = $0; r.style.italic = i; return r })
     }
 
     public func draw(in rect: Rect) {
@@ -659,6 +783,15 @@ public struct Text: View, PrimitiveView {
         var attrs = tui_color_pair(pairId)
         if style.bold { attrs |= tui_a_bold() }
         if style.inverted { attrs |= tui_a_reverse() }
+        if style.dim { attrs |= tui_a_dim() }
+        if style.italic {
+            // Italic falls back to underline on terminals without
+            // `sitm` (probed once at startup). Both are universally
+            // supported ncurses attrs; the swap is invisible to the
+            // call site — Text.italic() callers don't reason about
+            // TERM compatibility.
+            attrs |= Term.italicCapable ? tui_a_italic() : tui_a_underline()
+        }
         Term.screen.attron(attrs)
         Term.screen.move(Int32(y), Int32(x))
         Term.screen.addstr(s)

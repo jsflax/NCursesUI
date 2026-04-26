@@ -227,7 +227,19 @@ public struct Term {
     public static var rows: Int { screen.rows }
     public static var cols: Int { screen.cols }
 
-    public static func setup() { (screen as? NCursesScreen)?.setup() }
+    /// Cached terminfo `sitm` probe: does the active terminal entry
+    /// declare italic-on? Set once during `setup()` after ncurses is
+    /// initialised (terminfo lookups before `initscr()` are
+    /// undefined). Used by `Text.italic()` to decide between
+    /// `A_ITALIC` and the `A_UNDERLINE` fallback.
+    nonisolated(unsafe) public static var italicCapable: Bool = false
+
+    public static func setup() {
+        (screen as? NCursesScreen)?.setup()
+        // Probe italic capability AFTER ncurses init — `tigetstr`
+        // returns garbage before the term is set up.
+        italicCapable = tui_has_italic_cap() != 0
+    }
     public static func teardown() { (screen as? NCursesScreen)?.teardown() }
 
     public static func put(_ y: Int, _ x: Int, _ s: String) {
