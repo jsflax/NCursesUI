@@ -18,6 +18,11 @@ public struct TextField: View, KeyHandling {
     public let onSubmit: () -> Void
 
     @State private var cursor: Int = 0
+    /// Cursor blink frame index — 0..4 cycle: empty, dim, full, dim,
+    /// empty. Drives a "breathing" fade rather than a hard on/off
+    /// toggle. Starts at `2` so the cursor is at peak intensity the
+    /// instant the field gains focus (blinking-in is jarring).
+    @State private var blinkFrame: Int = 2
 
     public init(_ placeholder: String = "",
                 text: Binding<String>,
@@ -31,12 +36,23 @@ public struct TextField: View, KeyHandling {
 
     public var body: some View {
         renderText()
+            // Re-fires whenever focus toggles — when defocused, the
+            // task body returns immediately (the `guard isFocused`
+            // below) so no animation runs in the background.
+            .task(id: isFocused) {
+                guard isFocused else { return }
+                while !Task.isCancelled {
+                    try? await Task.sleep(for: .milliseconds(130))
+                    if Task.isCancelled { return }
+                    blinkFrame = (blinkFrame + 1) % 5
+                }
+            }
     }
 
     /// Draws the line. Unfocused + empty → placeholder dimmed. Unfocused +
     /// filled → plain text. Focused → text with the char at the cursor
-    /// rendered in reverse (or a reversed space when the cursor is at the
-    /// end).
+    /// rendered as a 5-frame breathing block (empty → dim → full → dim
+    /// → empty), driven by `blinkFrame`.
     private func renderText() -> Text {
         let focused = isFocused
         if text.isEmpty && !focused {
@@ -47,14 +63,25 @@ public struct TextField: View, KeyHandling {
         }
         let c = clampedCursor()
         let before = String(text.prefix(c))
+        let cursorChar: String
+        let after: String
         if c < text.count {
             let at = text.index(text.startIndex, offsetBy: c)
             let next = text.index(after: at)
-            let atChar = String(text[at..<next])
-            let after = String(text[next...])
-            return Text(before) + Text(atChar).reverse() + Text(after)
+            cursorChar = String(text[at..<next])
+            after = String(text[next...])
+        } else {
+            cursorChar = " "
+            after = ""
         }
-        return Text(before) + Text(" ").reverse()
+        let cursorRender: Text = {
+            switch blinkFrame {
+            case 0, 4: return Text(cursorChar)                              // empty
+            case 1, 3: return Text(cursorChar).reverse().foregroundColor(.dim) // dim
+            default:   return Text(cursorChar).reverse()                    // full
+            }
+        }()
+        return Text(before) + cursorRender + Text(after)
     }
 
     private func clampedCursor() -> Int {
