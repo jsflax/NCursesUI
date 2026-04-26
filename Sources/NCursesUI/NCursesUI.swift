@@ -1236,9 +1236,16 @@ public struct ScrollView<Content: View>: View, ContainerRendering, KeyHandling, 
 
     public func handleKey(_ ch: Int32) -> Bool {
         guard externalOffset == nil else { return false }
-        let cur = currentOffset
         let page = max(1, visibleHeight - 1)
         let maxOff = max(0, box.lastContentHeight - visibleHeight)
+        // Pre-clamp `cur` to `[0, maxOff]` BEFORE doing arithmetic.
+        // External-offset bindings (e.g. WorkspaceView's auto-pin)
+        // can write `Int.max` as a "scroll to bottom" sentinel that
+        // ScrollView's `afterChildren` clamps next frame — but if a
+        // key event arrives before the next render, raw addition on
+        // `Int.max` traps with arithmetic overflow. Clamping first
+        // also no-ops underflow on the upper-bound.
+        let cur = min(max(0, currentOffset), maxOff)
         switch ch {
         case Int32(KEY_UP):    setOffset(max(0, cur - 1))
         case Int32(KEY_DOWN):  setOffset(min(maxOff, cur + 1))
@@ -1263,8 +1270,13 @@ public struct ScrollView<Content: View>: View, ContainerRendering, KeyHandling, 
     }
 
     public func handleMouse(_ event: MouseEvent) -> Bool {
-        let cur = currentOffset
         let maxOff = max(0, box.lastContentHeight - visibleHeight)
+        // Pre-clamp — see handleKey above. External-offset bindings
+        // can stash `Int.max` as a "pin to bottom" sentinel, which
+        // would overflow when added to wheelStep before the next
+        // render's clamp. Clamping here is idempotent against the
+        // afterChildren clamp.
+        let cur = min(max(0, currentOffset), maxOff)
         switch event.kind {
         case .wheelUp:   setOffset(max(0, cur - Self.wheelStep))
         case .wheelDown: setOffset(min(maxOff, cur + Self.wheelStep))
