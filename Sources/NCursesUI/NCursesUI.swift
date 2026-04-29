@@ -1108,14 +1108,23 @@ public struct ScrollView<Content: View>: View, ContainerRendering, KeyHandling, 
     /// so selection-coupled scroll (e.g. "keep selected row visible") can
     /// read and write without owning the ScrollView's internal state.
     public let externalOffset: Binding<Int>?
+    /// When `externalOffset` is bound, key handling defaults to "let the
+    /// caller decide" because List-style callers use ↑/↓ for cursor moves.
+    /// Set this to `true` for plain pin-to-bottom / pure-scroll bindings
+    /// where arrow keys SHOULD scroll — needed when the host terminal
+    /// translates wheel events to KEY_UP/KEY_DOWN (mouse reporting off in
+    /// altscreen) and there's no separate keyboard channel for "scroll".
+    public let interceptScrollKeys: Bool
     @State var box: ScrollViewState = ScrollViewState()
 
     public init(height: Int,
                 offset: Binding<Int>? = nil,
+                interceptScrollKeys: Bool = false,
                 @ViewBuilder content: () -> Content) {
         self.visibleHeight = max(1, height)
         self.content = content()
         self.externalOffset = offset
+        self.interceptScrollKeys = interceptScrollKeys
     }
 
     public var body: some View {
@@ -1243,20 +1252,27 @@ public struct ScrollView<Content: View>: View, ContainerRendering, KeyHandling, 
     //
     // When an external offset binding is provided, the caller owns scroll
     // semantics (e.g. "keep selected row visible" in a list view where ↑/↓
-    // moves a cursor). In that mode we don't intercept keys at all — they
-    // bubble up to the caller's own `onKeyPress` handlers. When the binding
-    // is nil we handle arrows + paging ourselves (typical for an article
-    // reader or any purely-scrollable region).
+    // moves a cursor). In that mode we don't intercept keys by default —
+    // they bubble up to the caller's own `onKeyPress` handlers. When the
+    // binding is nil we handle arrows + paging ourselves (typical for an
+    // article reader or any purely-scrollable region). Pin-to-bottom and
+    // other "binding is just for offset, not selection" callers can set
+    // `interceptScrollKeys: true` to opt back in — required when the
+    // terminal is translating wheel events to KEY_UP/KEY_DOWN.
+
+    private var ownsScrollKeys: Bool {
+        externalOffset == nil || interceptScrollKeys
+    }
 
     public func handles(_ ch: Int32) -> Bool {
-        guard externalOffset == nil else { return false }
+        guard ownsScrollKeys else { return false }
         return ch == Int32(KEY_UP) || ch == Int32(KEY_DOWN)
             || ch == Int32(KEY_PPAGE) || ch == Int32(KEY_NPAGE)
             || ch == Int32(KEY_HOME) || ch == Int32(KEY_END)
     }
 
     public func handleKey(_ ch: Int32) -> Bool {
-        guard externalOffset == nil else { return false }
+        guard ownsScrollKeys else { return false }
         let page = max(1, visibleHeight - 1)
         let maxOff = max(0, box.lastContentHeight - visibleHeight)
         // Pre-clamp `cur` to `[0, maxOff]` BEFORE doing arithmetic.
@@ -2223,8 +2239,48 @@ public final class WindowServer: @unchecked Sendable, Scene {
 
     public func run() {
         defer { Term.teardown() }
-        signal(SIGINT,  { _ in endwin(); exit(0) })
-        signal(SIGTERM, { _ in endwin(); exit(0) })
+        // Diagnostic markers for the signal handlers. Two channels because
+        // each can fail in a different way:
+        //
+        //   1. `write(2, …)` to stderr — visible in terminal scrollback
+        //      IF the process is in main-screen mode at the time. If
+        //      ncurses is still in altscreen (alt buffer), `endwin()`
+        //      will discard alt-screen output, so this can vanish even
+        //      though it ran. Useful when `endwin()` succeeds.
+        //
+        //   2. `open()`+`write()`+`close()` to `/tmp/ccirc-signal.log`
+        //      — POSIX guarantees all three are async-signal-safe. This
+        //      file is the source of truth: if your process hangs on ^C
+        //      and this file did NOT get a fresh entry, SIGINT was never
+        //      delivered to our handler (something else stole it). If
+        //      the file DID get an entry but the process is still alive,
+        //      `endwin()` deadlocked. Tail it across runs to diagnose.
+        //
+        // Both fire BEFORE `endwin()`/`exit()` (neither is async-signal-
+        // safe — they can deadlock when called from a handler if the
+        // main thread holds the ncurses internal mutex or libc malloc).
+        signal(SIGINT,  { _ in
+            let msg = "\n[ccirc] SIGINT received — calling endwin/exit\n"
+            _ = msg.withCString { write(2, $0, strlen($0)) }
+            let fd = open("/tmp/ccirc-signal.log", O_WRONLY | O_APPEND | O_CREAT, 0o644)
+            if fd >= 0 {
+                let line = "SIGINT\n"
+                _ = line.withCString { write(fd, $0, strlen($0)) }
+                close(fd)
+            }
+            endwin(); exit(0)
+        })
+        signal(SIGTERM, { _ in
+            let msg = "\n[ccirc] SIGTERM received — calling endwin/exit\n"
+            _ = msg.withCString { write(2, $0, strlen($0)) }
+            let fd = open("/tmp/ccirc-signal.log", O_WRONLY | O_APPEND | O_CREAT, 0o644)
+            if fd >= 0 {
+                let line = "SIGTERM\n"
+                _ = line.withCString { write(fd, $0, strlen($0)) }
+                close(fd)
+            }
+            endwin(); exit(0)
+        })
 
         EnvironmentValues._current.screen = self
         logger.debug("[WindowServer.run] entering main loop")
