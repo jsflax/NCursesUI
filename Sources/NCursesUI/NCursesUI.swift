@@ -207,7 +207,15 @@ public struct Rect: Equatable, Sendable, CustomStringConvertible {
 }
 
 public struct Style {
-    public var color: Color = .dim
+    /// Default foreground colour. `Color.normal` resolves to ncurses
+    /// pair 0 (no SGR colour applied), so untagged `Text` renders in
+    /// the user's terminal default — distinct from `Color.dim` (xterm-
+    /// 256 grey 244 + A_DIM) and from `Color.white` (an explicit ANSI
+    /// 7 white pair). Pre-Apr-29 the default was `.dim`, which only
+    /// looked like default-fg by accident because the dim pair was
+    /// (COLOR_WHITE, default); fixing dim to actually render dim
+    /// required separating the two roles.
+    public var color: Color = .normal
     public var bold: Bool = false
     public var inverted: Bool = false
     /// `A_DIM` ncurses attribute — half-opacity render. Distinct from
@@ -224,7 +232,7 @@ public struct Style {
     /// that semantic slot instead of the legacy 9-slot `Color` enum.
     /// Set by `Text.foregroundColor(_ role: Palette.Role)`.
     public var palettePair: Int32? = nil
-    public init(color: Color = .dim, bold: Bool = false, inverted: Bool = false) {
+    public init(color: Color = .normal, bold: Bool = false, inverted: Bool = false) {
         self.color = color; self.bold = bold; self.inverted = inverted
     }
 }
@@ -783,7 +791,14 @@ public struct Text: View, PrimitiveView {
         var attrs = tui_color_pair(pairId)
         if style.bold { attrs |= tui_a_bold() }
         if style.inverted { attrs |= tui_a_reverse() }
-        if style.dim { attrs |= tui_a_dim() }
+        // OR in `A_DIM` whenever the call-site foreground was `.dim` —
+        // belt-and-suspenders alongside the 256-colour grey 244 that
+        // pair init now uses, so terminals that honour A_DIM make the
+        // text even dimmer and terminals that ignore A_DIM still get
+        // a visibly grey foreground.
+        if style.dim || (style.palettePair == nil && style.color == .dim) {
+            attrs |= tui_a_dim()
+        }
         if style.italic {
             // Italic falls back to underline on terminals without
             // `sitm` (probed once at startup). Both are universally
@@ -2176,9 +2191,10 @@ public final class WindowServer: @unchecked Sendable, Scene {
     /// "key press at tick N → reconcile at tick N+1 → draw at tick N+1".
     private var _tick: UInt64 = 0
 
-    public init(@ViewBuilder _ rootView: @escaping () -> some View) {
-        Term.setup()
-        logger.debug("[WindowServer.init] Term.setup done cols=\(Term.cols) rows=\(Term.rows)")
+    public init(mouseReporting: Bool = true,
+                @ViewBuilder _ rootView: @escaping () -> some View) {
+        Term.setup(mouseReporting: mouseReporting)
+        logger.debug("[WindowServer.init] Term.setup done cols=\(Term.cols) rows=\(Term.rows) mouseReporting=\(mouseReporting)")
         rootNode = Node(view: rootView(), parent: nil, screen: self)
         logger.debug("[WindowServer.init] root mounted, performing initial draw")
         rootNode?.draw(in: Rect(x: 0, y: 0, width: Term.cols, height: Term.rows))

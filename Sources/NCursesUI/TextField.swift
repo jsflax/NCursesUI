@@ -18,11 +18,12 @@ public struct TextField: View, KeyHandling {
     public let onSubmit: () -> Void
 
     @State private var cursor: Int = 0
-    /// Cursor blink frame index — 0..4 cycle: empty, dim, full, dim,
-    /// empty. Drives a "breathing" fade rather than a hard on/off
-    /// toggle. Starts at `2` so the cursor is at peak intensity the
-    /// instant the field gains focus (blinking-in is jarring).
-    @State private var blinkFrame: Int = 2
+    /// Cursor blink frame index — 0..4 cycle: off, dim block, full
+    /// block, bold block, dim block. Drives a "breathing" fade
+    /// through 4 visible intensities. Starts at `3` so the cursor
+    /// is at peak intensity the instant the field gains focus
+    /// (blinking-in is jarring).
+    @State private var blinkFrame: Int = 3
 
     public init(_ placeholder: String = "",
                 text: Binding<String>,
@@ -50,9 +51,16 @@ public struct TextField: View, KeyHandling {
     }
 
     /// Draws the line. Unfocused + empty → placeholder dimmed. Unfocused +
-    /// filled → plain text. Focused → text with the char at the cursor
-    /// rendered as a 5-frame breathing block (empty → dim → full → dim
-    /// → empty), driven by `blinkFrame`.
+    /// filled → plain text. Focused → text with the cursor rendered as
+    /// a 5-frame breathing block: off → dim █ → █ → bold █ → dim █.
+    ///
+    /// The block uses `"█"` (U+2588 FULL BLOCK) as a real foreground
+    /// glyph rather than `.reverse()` on a space cell. They look
+    /// identical at peak (a solid fg-colored block), but reversing a
+    /// space leaves nothing for `A_DIM` to dim — the new fg is the
+    /// terminal background, already at minimum brightness — so the
+    /// breath collapsed to a 2-state hard blink. Drawing a real glyph
+    /// gives `.dim()` and `.bold()` an actual color to modulate.
     private func renderText() -> Text {
         let focused = isFocused
         if text.isEmpty && !focused {
@@ -63,22 +71,20 @@ public struct TextField: View, KeyHandling {
         }
         let c = clampedCursor()
         let before = String(text.prefix(c))
-        let cursorChar: String
         let after: String
         if c < text.count {
-            let at = text.index(text.startIndex, offsetBy: c)
-            let next = text.index(after: at)
-            cursorChar = String(text[at..<next])
+            let next = text.index(text.startIndex, offsetBy: c + 1)
             after = String(text[next...])
         } else {
-            cursorChar = " "
             after = ""
         }
         let cursorRender: Text = {
             switch blinkFrame {
-            case 0, 4: return Text(cursorChar)                       // empty
-            case 1, 3: return Text(cursorChar).reverse().dim()       // faded reverse
-            default:   return Text(cursorChar).reverse()             // solid reverse
+            case 0:  return Text(" ")                  // off
+            case 1:  return Text("█").dim()            // low (rising)
+            case 2:  return Text("█")                  // mid
+            case 3:  return Text("█").bold()           // peak
+            default: return Text("█").dim()            // low (descending) — frame 4
             }
         }()
         return Text(before) + cursorRender + Text(after)

@@ -34,6 +34,12 @@ public protocol Screen: AnyObject, Sendable {
 // MARK: - Color
 
 public enum Color: Int32, Sendable {
+    /// Terminal default foreground + background. Used as the default
+    /// `Text` colour so untagged labels render in the user's normal
+    /// terminal foreground (white-on-black in most themes), not in
+    /// any specific palette slot. Bound to ncurses pair (-1, -1) via
+    /// `use_default_colors()`.
+    case normal = 0
     case green = 1
     case red = 2
     case yellow = 3
@@ -43,6 +49,15 @@ public enum Color: Int32, Sendable {
     case magenta = 7
     case blue = 8
     case white = 9
+    /// Distinct purple — bound to xterm-256 index 99 (`#875FFF`) when
+    /// the terminal has 256-colour support, else falls back to magenta.
+    case purple = 10
+    /// Warm gold — xterm-256 index 220 (`#FFD700`); falls back to yellow
+    /// when the terminal is 8-colour only.
+    case gold = 11
+    /// Saturated teal / blue-green — xterm-256 index 37 (`#00AFAF`);
+    /// falls back to cyan in 8-colour terminals.
+    case teal = 12
 }
 
 // MARK: - Mouse / unified event
@@ -169,7 +184,7 @@ public final class NCursesScreen: Screen, @unchecked Sendable {
         _ = tui_doupdate()
     }
 
-    public func setup() {
+    public func setup(mouseReporting: Bool = true) {
         setlocale(LC_ALL, "")
         initscr()
         cbreak()
@@ -184,14 +199,29 @@ public final class NCursesScreen: Screen, @unchecked Sendable {
         // via `tryDecodeSGRMouse`, arrow keys via `tryDecodeCSIKey`).
         keypad(tui_stdscr(), false)
         wtimeout(tui_stdscr(), 16)
-        // `mousemask` handles the terminfo write that Terminal.app needs
-        // to enter mouse-reporting mode. We still need it even with
-        // keypad off. SGR (?1006h) is enabled separately so coords past
-        // col 223 and both wheel directions arrive with stable encoding.
-        mousemask(tui_all_mouse_events(), nil)
-        fputs("\033[?1006h", stdout)
-        fflush(stdout)
-        Term._mouseLog("setup: keypad=off, mousemask=ALL_MOUSE_EVENTS, SGR enabled — Swift parses escape sequences")
+        if mouseReporting {
+            // `mousemask` handles the terminfo write that Terminal.app
+            // needs to enter mouse-reporting mode. We still need it
+            // even with keypad off. SGR (?1006h) is enabled separately
+            // so coords past col 223 and both wheel directions arrive
+            // with stable encoding.
+            mousemask(tui_all_mouse_events(), nil)
+            fputs("\033[?1006h", stdout)
+            fflush(stdout)
+            Term._mouseLog("setup: keypad=off, mousemask=ALL_MOUSE_EVENTS, SGR enabled — Swift parses escape sequences")
+        } else {
+            // Caller opted out of mouse reporting so the terminal can
+            // do native click-and-drag selection. Belt-and-suspenders
+            // explicit disable of every tracking mode in case something
+            // upstream (parent shell, tmux passthrough) left one on.
+            // Modern terminals translate scroll-wheel into KEY_UP /
+            // KEY_DOWN while in altscreen with mouse reporting off,
+            // so ScrollView's keyboard path keeps wheel scroll working.
+            mousemask(0, nil)
+            fputs("\033[?1006l\033[?1003l\033[?1002l\033[?1000l", stdout)
+            fflush(stdout)
+            Term._mouseLog("setup: keypad=off, mouse reporting OFF — terminal handles native selection; wheel arrives as arrow keys")
+        }
 
         if has_colors() {
             start_color()
@@ -201,10 +231,39 @@ public final class NCursesScreen: Screen, @unchecked Sendable {
             init_pair(Int16(Color.yellow.rawValue),  Int16(COLOR_YELLOW),  -1)
             init_pair(Int16(Color.cyan.rawValue),    Int16(COLOR_CYAN),    -1)
             init_pair(Int16(Color.selected.rawValue),Int16(COLOR_WHITE),   Int16(COLOR_BLUE))
-            init_pair(Int16(Color.dim.rawValue),     Int16(COLOR_WHITE),   -1)
+            // `Color.dim` was historically pair (COLOR_WHITE, default),
+            // i.e. plain default foreground — visually identical to
+            // regular text on most terminals, which made section
+            // headers and timestamps tagged `.dim` look the same as
+            // normal content. Bind it to xterm-256 grey 244 (`#808080`)
+            // when 256-colour is available; the draw path also ORs in
+            // `A_DIM` for this pair as belt-and-suspenders against
+            // terminals that ignore the attribute.
+            if tui_colors() >= 256 {
+                init_pair(Int16(Color.dim.rawValue), 244, -1)
+            } else {
+                init_pair(Int16(Color.dim.rawValue), Int16(COLOR_WHITE), -1)
+            }
             init_pair(Int16(Color.magenta.rawValue), Int16(COLOR_MAGENTA), -1)
             init_pair(Int16(Color.blue.rawValue),    Int16(COLOR_BLUE),    -1)
             init_pair(Int16(Color.white.rawValue),   Int16(COLOR_WHITE),   -1)
+
+            // Extended palette — distinct purple/gold/teal slots that
+            // pull from the xterm-256 index space when the terminal
+            // supports it; otherwise fall back to the closest 8-colour
+            // primary. Read `COLORS` via the existing `tui_colors()`
+            // shim — Swift 6 strict concurrency rejects the C global
+            // directly even though `start_color()` above sets it once
+            // and it never mutates afterwards.
+            if tui_colors() >= 256 {
+                init_pair(Int16(Color.purple.rawValue), 99,  -1)  // #875FFF
+                init_pair(Int16(Color.gold.rawValue),   220, -1)  // #FFD700
+                init_pair(Int16(Color.teal.rawValue),   37,  -1)  // #00AFAF
+            } else {
+                init_pair(Int16(Color.purple.rawValue), Int16(COLOR_MAGENTA), -1)
+                init_pair(Int16(Color.gold.rawValue),   Int16(COLOR_YELLOW),  -1)
+                init_pair(Int16(Color.teal.rawValue),   Int16(COLOR_CYAN),    -1)
+            }
 
             // Register the default palette so Palette-driven views have pairs
             // available from frame 1. Apps that want a different palette call
@@ -234,8 +293,8 @@ public struct Term {
     /// `A_ITALIC` and the `A_UNDERLINE` fallback.
     nonisolated(unsafe) public static var italicCapable: Bool = false
 
-    public static func setup() {
-        (screen as? NCursesScreen)?.setup()
+    public static func setup(mouseReporting: Bool = true) {
+        (screen as? NCursesScreen)?.setup(mouseReporting: mouseReporting)
         // Probe italic capability AFTER ncurses init — `tigetstr`
         // returns garbage before the term is set up.
         italicCapable = tui_has_italic_cap() != 0
