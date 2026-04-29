@@ -475,20 +475,26 @@ public struct Text: View, PrimitiveView {
 
     /// Styled segment of a Text. A plain `Text("hi")` has a single run;
     /// concatenating with `+` produces a Text with multiple runs, each
-    /// retaining its own style. Internal — callers compose via `Text + Text`
-    /// and the public modifiers, they don't build Runs directly.
-    struct Run {
-        var content: String
-        var style: Style
+    /// retaining its own style. `package` so peer parsers (`ANSIText`,
+    /// `parseMarkdown`) can build runs directly and tests in the same
+    /// package can introspect them; external callers compose via
+    /// `Text + Text` and the public modifiers.
+    package struct Run {
+        package var content: String
+        package var style: Style
+        package init(content: String, style: Style) {
+            self.content = content
+            self.style = style
+        }
     }
 
-    let runs: [Run]
+    package let runs: [Run]
 
     public init(_ content: String) {
         self.runs = [Run(content: content, style: Style())]
     }
 
-    init(runs: [Run]) {
+    package init(runs: [Run]) {
         self.runs = runs
     }
 
