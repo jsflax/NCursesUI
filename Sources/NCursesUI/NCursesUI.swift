@@ -2259,11 +2259,25 @@ public final class WindowServer: @unchecked Sendable, Scene {
     /// "key press at tick N → reconcile at tick N+1 → draw at tick N+1".
     private var _tick: UInt64 = 0
 
+    /// Last-observed terminal size. ncurses delivers `KEY_RESIZE` only via
+    /// the next `wgetch` call after SIGWINCH; if SIGWINCH fires while we're
+    /// not blocked in input (i.e. between ticks, during `RunLoop.main.run`,
+    /// or in the middle of a draw), the event can be dropped on the floor
+    /// — `Term.cols/rows` reflect the new size but no event arrives, so
+    /// `hasPendingWork` stays false and the views don't redraw until the
+    /// user happens to press a key. Polling here closes that gap: every
+    /// tick compares the current size to the snapshot and marks the root
+    /// dirty if it changed.
+    private var lastCols: Int = 0
+    private var lastRows: Int = 0
+
     public init(mouseReporting: Bool = true,
                 @ViewBuilder _ rootView: @escaping () -> some View) {
         Term.setup(mouseReporting: mouseReporting)
         logger.debug("[WindowServer.init] Term.setup done cols=\(Term.cols) rows=\(Term.rows) mouseReporting=\(mouseReporting)")
         rootNode = Node(view: rootView(), parent: nil, screen: self)
+        lastCols = Term.cols
+        lastRows = Term.rows
         logger.debug("[WindowServer.init] root mounted, performing initial draw")
         rootNode?.draw(in: Rect(x: 0, y: 0, width: Term.cols, height: Term.rows))
     }
@@ -2347,6 +2361,19 @@ public final class WindowServer: @unchecked Sendable, Scene {
             // soon as the queue is empty — no extra blocking.
             _ = RunLoop.main.run(mode: .default, before: Date(timeIntervalSinceNow: 0))
             _tick &+= 1
+            // Poll for terminal resize. ncurses' KEY_RESIZE only arrives
+            // via the next wgetch after SIGWINCH — if the signal landed
+            // while we weren't blocked in input, no event ever reaches
+            // dispatchEvent. Detect by comparing Term.cols/rows (which
+            // ncurses' SIGWINCH handler updates synchronously) against
+            // our snapshot.
+            if let root = rootNode, Term.cols != lastCols || Term.rows != lastRows {
+                logger.debug("[tick \(self._tick)] resize detected \(self.lastCols)x\(self.lastRows) -> \(Term.cols)x\(Term.rows)")
+                lastCols = Term.cols
+                lastRows = Term.rows
+                root.dirty = true
+                hasPendingWork = true
+            }
             if hasPendingWork, let root = rootNode {
                 NodeLayout.measureGeneration &+= 1
                 let tStart = DispatchTime.now()
