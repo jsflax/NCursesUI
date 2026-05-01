@@ -37,23 +37,41 @@ struct FileLogHandler {
         return h
     }
 
-    func log(level: OSLogType, message: String,
+    /// The render-walk trace log is **compile-time gated** behind the
+    /// `NCURSESUI_DEBUG_LOG` flag. Default builds compile the function
+    /// body away entirely — no string interpolation, no Date() call,
+    /// no OSLog hop, no lock contention. Sample profiling on a build
+    /// with this code unconditionally enabled showed ~12% of wall
+    /// time spent in `log` + `debug` + `_NSFileManagerBridge.createFile`
+    /// after a few cards mount; with hundreds of [mount] / [expand] /
+    /// [reconcile] / [draw] / [@State.set] events per render walk,
+    /// the cost is proportional to view-tree size, not user activity.
+    /// Re-enable for live debugging with `swift build -Xswiftc -DNCURSESUI_DEBUG_LOG`.
+    ///
+    /// `@autoclosure` on `message` defers the interpolation at the call
+    /// site, so even if a future caller forgets the `#if` guard, the
+    /// allocation only happens when the body is compiled in.
+    func log(level: OSLogType, message: @autoclosure () -> String,
              file: String = #file,
              function: String = #function,
              line: UInt = #line) {
-        let entry = "[\(Date())] [\(level)] [\(label)] \(message)\n"
+        #if NCURSESUI_DEBUG_LOG
+        let entry = "[\(Date())] [\(level)] [\(label)] \(message())\n"
         logger.log(level: level, "\(entry, privacy: .public)")
         guard let data = entry.data(using: .utf8), let h = handle() else { return }
         FileLogHandler.writeLock.lock()
         h.write(data)
         FileLogHandler.writeLock.unlock()
+        #endif
     }
 
-    func debug(_ message: String,
+    func debug(_ message: @autoclosure () -> String,
                file: String = #file,
                function: String = #function,
                line: UInt = #line) {
-        log(level: .debug, message: message, file: file, function: function, line: line)
+        #if NCURSESUI_DEBUG_LOG
+        log(level: .debug, message: message(), file: file, function: function, line: line)
+        #endif
     }
 }
 
@@ -630,6 +648,16 @@ public struct Text: View, PrimitiveView {
     /// `foregroundColor(_:)`; palette-driven views use this.
     public func paletteColor(_ role: Palette.Role) -> Text {
         let pair = PaletteRegistrar.pairId(for: role)
+        return Text(runs: runs.map { var r = $0; r.style.palettePair = pair; return r })
+    }
+
+    /// Paint this Text in the active palette's RGB for `role`, on top of
+    /// a diff-add or diff-remove row background. Used by `DiffLineView`
+    /// to render syntax-highlighted code on a colored row fill — every
+    /// cell in the run carries the fg-on-diffBg pair, so trailing
+    /// padding spaces also show the diff bg.
+    public func paletteColor(_ role: Palette.Role, on bg: Palette.DiffBg) -> Text {
+        let pair = PaletteRegistrar.pairId(for: role, on: bg)
         return Text(runs: runs.map { var r = $0; r.style.palettePair = pair; return r })
     }
 
@@ -1828,6 +1856,12 @@ public protocol ViewNode: AnyObject {
     /// Walk-up access to the parent node, used by tests and key-routing helpers.
     /// Weak in concrete `Node`; existential here so any conformer fits.
     var parent: (any ViewNode)? { get }
+
+    // Type-erased introspection used by the in-process NCUITest probe.
+    // Conformers expose their concrete view + children behind these properties
+    // so existential ViewNode references can walk the tree without knowing V.
+    var anyView: any View { get }
+    var anyChildren: [any ViewNode] { get }
 }
 
 extension ViewNode {
@@ -1836,6 +1870,11 @@ extension ViewNode {
             self.view = view
         }
     }
+
+    /// Default introspection: view is `view` cast to existential, children empty.
+    /// Concrete `Node` overrides `anyChildren` to expose its real subtree.
+    public var anyView: any View { view }
+    public var anyChildren: [any ViewNode] { [] }
 }
 // MARK: - Node (persistent, tree-structured)
 
@@ -1861,6 +1900,9 @@ public final class Node<V: View>: ViewNode, @unchecked Sendable {
     public var view: V
     public var dirty: Bool = true
     public var frame: Rect = .zero
+
+    /// Override the protocol default to expose the live subtree by reference.
+    public var anyChildren: [any ViewNode] { children }
     /// Per-frame measure cache. Layout cascades call `child.measure(…)`
     /// from both `VStack.measure` and `VStack.childRects`, which each
     /// recurse through the whole subtree — for a 500-row list that
@@ -2209,6 +2251,10 @@ public final class WindowServer: @unchecked Sendable, Scene {
 //    private let makeRootView: () -> any View
     private var hasPendingWork = true
     public var shouldExit = false
+
+    /// Type-erased access to the root node, used by NCUITest's in-process probe
+    /// to walk the live view tree. `package` so it doesn't leak past NCursesUI.
+    package var rootViewNode: (any ViewNode)? { rootNode }
     /// Monotonic counter to tag each tick in logs — useful for correlating
     /// "key press at tick N → reconcile at tick N+1 → draw at tick N+1".
     private var _tick: UInt64 = 0
@@ -2283,6 +2329,13 @@ public final class WindowServer: @unchecked Sendable, Scene {
         })
 
         EnvironmentValues._current.screen = self
+
+        // Auto-bootstrap the NCUITest probe if the env var is set. No-op
+        // otherwise: production binaries pay one env-var read at startup.
+        if let socketPath = ProcessInfo.processInfo.environment["NCUITEST_SOCKET"] {
+            NCUIProbe.shared.start(socketPath: socketPath, windowServer: self)
+        }
+
         logger.debug("[WindowServer.run] entering main loop")
 
         while !shouldExit {
@@ -2308,6 +2361,7 @@ public final class WindowServer: @unchecked Sendable, Scene {
                 let tAfterReconcile = DispatchTime.now()
                 EnvironmentValues._current = saved
                 Term.refresh()
+                NCUIProbe.shared.frameDidRender()
                 let tAfterRefresh = DispatchTime.now()
                 hasPendingWork = false
                 // Sub-ms frame timing — each step separately so we can see
@@ -2331,6 +2385,15 @@ public final class WindowServer: @unchecked Sendable, Scene {
             // subsequent reads use a zero-ms timeout to return `.none`
             // immediately when the kernel buffer is empty.
             if let root = rootNode {
+                // Drain probe-injected events first. They take priority over
+                // real input — if a test is driving the app, real keys (e.g.
+                // a bystander typing in the tmux pane) would only confuse the
+                // test. NCUITEST_SOCKET being unset means the injector is
+                // dormant and this loop runs once with nil.
+                while let synthetic = NCUIProbe.shared.injectIfPending() {
+                    dispatchEvent(synthetic, to: root)
+                    self.hasPendingWork = true
+                }
                 let first = Term.nextEvent()          // 16ms idle pacing
                 if case .none = first {} else {
                     dispatchEvent(first, to: root)
