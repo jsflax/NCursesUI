@@ -54,6 +54,11 @@ public struct Palette: Sendable, Hashable {
     public let codeNum: RGB
     public let codeIdent: RGB
     public let codePunct: RGB
+    /// Row-fill bg for added diff lines — paired with code-token fg
+    /// roles in `PaletteRegistrar.activate()` so DiffLineView can
+    /// render syntax-highlighted text on a colored row.
+    public let diffAddBg: RGB
+    public let diffRemoveBg: RGB
 
     // MARK: - Role addressing
 
@@ -64,6 +69,10 @@ public struct Palette: Sendable, Hashable {
         case codeKw, codeStr, codeCom, codeNum, codeIdent, codePunct
         case nick(Int)          // 0..7
     }
+
+    /// Picks which diff-row background a fg role is composed against
+    /// when calling `Text.paletteColor(_:on:)`.
+    public enum DiffBg: Sendable, Hashable { case add, remove }
 
     public func rgb(for role: Role) -> RGB {
         switch role {
@@ -128,7 +137,9 @@ public extension Palette {
         codeCom: RGB(hex: "#4a7238")!,
         codeNum: RGB(hex: "#6fd3ff")!,
         codeIdent: RGB(hex: "#d9f0b8")!,
-        codePunct: RGB(hex: "#7a9a5a")!
+        codePunct: RGB(hex: "#7a9a5a")!,
+        diffAddBg: RGB(hex: "#0d2410")!,
+        diffRemoveBg: RGB(hex: "#2a0d0a")!
     )
 
     static let amber = Palette(
@@ -154,7 +165,9 @@ public extension Palette {
         codeCom: RGB(hex: "#8a5a1e")!,
         codeNum: RGB(hex: "#ff8a3c")!,
         codeIdent: RGB(hex: "#ffcf7a")!,
-        codePunct: RGB(hex: "#a0662a")!
+        codePunct: RGB(hex: "#a0662a")!,
+        diffAddBg: RGB(hex: "#1f2208")!,
+        diffRemoveBg: RGB(hex: "#2a0e08")!
     )
 
     static let modern = Palette(
@@ -180,7 +193,9 @@ public extension Palette {
         codeCom: RGB(hex: "#6a7280")!,
         codeNum: RGB(hex: "#7fd4ff")!,
         codeIdent: RGB(hex: "#d7dbe0")!,
-        codePunct: RGB(hex: "#8a93a3")!
+        codePunct: RGB(hex: "#8a93a3")!,
+        diffAddBg: RGB(hex: "#0f2a18")!,
+        diffRemoveBg: RGB(hex: "#2a1418")!
     )
 
     static let claude = Palette(
@@ -206,7 +221,9 @@ public extension Palette {
         codeCom: RGB(hex: "#8a7a68")!,
         codeNum: RGB(hex: "#c9a46a")!,
         codeIdent: RGB(hex: "#ede4d3")!,
-        codePunct: RGB(hex: "#9d8a74")!
+        codePunct: RGB(hex: "#9d8a74")!,
+        diffAddBg: RGB(hex: "#1f2a18")!,
+        diffRemoveBg: RGB(hex: "#2e1814")!
     )
 
     static let all: [Palette] = [.phosphor, .amber, .modern, .claude]
@@ -219,8 +236,8 @@ public extension Palette {
 // MARK: - ncurses activation
 //
 // When a palette is activated we register:
-//   - 16 custom color indices in ncurses slots 32..47 (if can_change_color)
-//   - 24 color pairs in slots 32..55:
+//   - Custom color indices in ncurses slots 32..59 (if can_change_color)
+//   - Color pairs in slots 32..79:
 //       32 fg           on bg
 //       33 dim          on bg
 //       34 mute         on bg
@@ -233,6 +250,11 @@ public extension Palette {
 //       41 reverse-bar  reverseFg on reverseBg
 //       42..49 nicks[0..7] on bg
 //       50 codeKw, 51 codeStr, 52 codeCom, 53 codeNum, 54 codeIdent, 55 codePunct
+//       60..69 diff-add tier (fg, dim, ok, danger, codeKw/Str/Com/Num/Ident/Punct on diffAddBg)
+//       70..79 diff-remove tier (same fg roles on diffRemoveBg)
+//
+// Color slots beyond the 16-color region:
+//   58 diffAddBg, 59 diffRemoveBg
 //
 // On legacy terminals without can_change_color we fall back to the 16-color
 // ANSI approximation — same pair IDs, concrete colors nearest-matched.
@@ -262,6 +284,29 @@ public struct PaletteRegistrar {
         case .codeNum: return 53
         case .codeIdent: return 54
         case .codePunct: return 55
+        }
+    }
+
+    /// Pair ID for a fg `role` painted on a diff-row background. Only the
+    /// 10 roles registered against the diff-bg tier are supported (fg, dim,
+    /// ok, danger, codeKw/Str/Com/Num/Ident/Punct) — those are the only
+    /// ones that ever appear in diff content. Other roles (nick, accent,
+    /// hl, etc.) trip a precondition since there's no pre-registered pair.
+    public static func pairId(for role: Palette.Role, on bg: Palette.DiffBg) -> Int32 {
+        let base: Int32 = bg == .add ? 60 : 70
+        switch role {
+        case .fg:        return base + 0
+        case .dim:       return base + 1
+        case .ok:        return base + 2
+        case .danger:    return base + 3
+        case .codeKw:    return base + 4
+        case .codeStr:   return base + 5
+        case .codeCom:   return base + 6
+        case .codeNum:   return base + 7
+        case .codeIdent: return base + 8
+        case .codePunct: return base + 9
+        default:
+            preconditionFailure("Palette.Role \(role) is not registered against diff backgrounds")
         }
     }
 
@@ -311,6 +356,11 @@ public struct PaletteRegistrar {
         let num   = colorIndex(palette.codeNum,   at: 55, canChange: canChange, fallback: COLOR_CYAN)
         let ident = colorIndex(palette.codeIdent, at: 56, canChange: canChange, fallback: COLOR_WHITE)
         let punct = colorIndex(palette.codePunct, at: 57, canChange: canChange, fallback: COLOR_WHITE)
+        // Diff-row backgrounds. Truecolor terminals get the palette's
+        // dark-tinted RGB; legacy 16-color terminals fall back to coarse
+        // ANSI red/green — the diff effect still reads, just blockier.
+        let addBg = colorIndex(palette.diffAddBg,    at: 58, canChange: canChange, fallback: COLOR_GREEN)
+        let remBg = colorIndex(palette.diffRemoveBg, at: 59, canChange: canChange, fallback: COLOR_RED)
 
         // Register pairs. Use -1 for "default terminal bg" if we're on a
         // legacy 16-color terminal (so the user's real terminal background
@@ -337,6 +387,19 @@ public struct PaletteRegistrar {
         _ = tui_init_pair(pairId(for: .codeNum),   num,   actualBg)
         _ = tui_init_pair(pairId(for: .codeIdent), ident, actualBg)
         _ = tui_init_pair(pairId(for: .codePunct), punct, actualBg)
+
+        // Diff-row tiers: the same 10 fg roles painted on diff-add /
+        // diff-remove backgrounds. Order in the tuple list mirrors the
+        // offsets used by `pairId(for:on:)` above.
+        let diffFgs: [(Palette.Role, Int32)] = [
+            (.fg, fg), (.dim, dim), (.ok, ok), (.danger, danger),
+            (.codeKw, kw), (.codeStr, str), (.codeCom, com),
+            (.codeNum, num), (.codeIdent, ident), (.codePunct, punct),
+        ]
+        for (role, fgCol) in diffFgs {
+            _ = tui_init_pair(pairId(for: role, on: .add),    fgCol, addBg)
+            _ = tui_init_pair(pairId(for: role, on: .remove), fgCol, remBg)
+        }
     }
 
     /// Either define a custom ncurses color at `slot` (truecolor path) or
