@@ -8,6 +8,8 @@ let package = Package(
     products: [
         .library(name: "NCursesUI", targets: ["NCursesUI"]),
         .library(name: "Cncurses", targets: ["Cncurses"]),
+        .library(name: "NCUITestProtocol", targets: ["NCUITestProtocol"]),
+        .library(name: "NCUITest", targets: ["NCUITest"]),
         .executable(name: "WidgetsDemo", targets: ["WidgetsDemo"]),
         .executable(name: "OverlayTaskRepro", targets: ["OverlayTaskRepro"]),
     ],
@@ -23,15 +25,27 @@ let package = Package(
             ]
         ),
         .target(
+            name: "NCUITestProtocol"
+        ),
+        .target(
             name: "NCursesUI",
             dependencies: [
                 "Cncurses",
+                "NCUITestProtocol",
                 .product(name: "Logging", package: "swift-log"),
             ]
+        ),
+        .target(
+            name: "NCUITest",
+            dependencies: ["NCUITestProtocol"]
         ),
         .testTarget(
             name: "NCursesUITests",
             dependencies: ["NCursesUI"]
+        ),
+        .testTarget(
+            name: "NCUITestSelfTests",
+            dependencies: ["NCUITest", "WidgetsDemo"]
         ),
         .executableTarget(
             name: "WidgetsDemo",
