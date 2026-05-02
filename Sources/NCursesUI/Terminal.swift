@@ -301,6 +301,16 @@ public struct Term {
     }
     public static func teardown() { (screen as? NCursesScreen)?.teardown() }
 
+    /// Audible / visual bell via the terminfo `bel` capability.
+    /// Routes through ncurses (`beep()`) so it interleaves correctly
+    /// with the curses output buffer instead of getting eaten by it
+    /// — a raw `\u{07}` to stdout/stderr can be swallowed by tmux's
+    /// pane bell handling or curses' own buffering. ncurses falls
+    /// back to `flash()` if the terminfo entry has no `bel`.
+    public static func bell() {
+        _ = tui_beep()
+    }
+
     public static func put(_ y: Int, _ x: Int, _ s: String) {
         screen.move(Int32(y), Int32(x))
         screen.addstr(s)
