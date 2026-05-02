@@ -140,7 +140,23 @@ public final class NCUIApplication: @unchecked Sendable {
         let binaryQuoted = Self.shellQuote(binary)
         let argsQuoted = launchArguments.map(Self.shellQuote).joined(separator: " ")
         let logQuoted = Self.shellQuote(logPath)
-        let cmd = "\(binaryQuoted)\(argsQuoted.isEmpty ? "" : " \(argsQuoted)") 2>&1 | tee \(logQuoted)"
+
+        // Belt-and-suspenders env injection: prefix the env vars inline
+        // in the shell command (`KEY=VAL ... binary args`) in addition to
+        // tmux's `-e KEY=VAL` flags. Observed: with the chain
+        // Xcode → swift-test → Process → tmux → sh → binary, tmux's `-e`
+        // flag does NOT reliably propagate variables to the spawned
+        // command (Doctor's `which claude` fails inside the binary even
+        // when our resolved PATH contained ~/.local/bin). The inline form
+        // is interpreted by sh -c right before exec'ing the binary, so
+        // the binary's env is guaranteed regardless of tmux behavior.
+        // We keep the tmux `-e` flags too — they're harmless when the
+        // inline prefix already won.
+        let envPrefix = env
+            .sorted(by: { $0.key < $1.key })  // stable order for log readability
+            .map { "\($0.key)=\(Self.shellQuote($0.value))" }
+            .joined(separator: " ")
+        let cmd = "\(envPrefix) \(binaryQuoted)\(argsQuoted.isEmpty ? "" : " \(argsQuoted)") 2>&1 | tee \(logQuoted)"
 
         _ = try driver.startSession(
             env: env,
