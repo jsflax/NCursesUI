@@ -67,6 +67,13 @@ static inline void tui_wattroff(WINDOW *w, int a) { wattroff(w, a); }
 // stdscr accessor — avoids Swift 6 concurrency warnings on the C global
 static inline WINDOW *tui_stdscr(void) { return stdscr; }
 
+// Audible / visual bell. Routes through ncurses (terminfo `bel` cap, with
+// `flash()` fallback when bel is missing) so it interleaves with the
+// curses output buffer instead of getting eaten by it. Wrapped because
+// `beep` is sometimes a macro and the bare Swift import may not pick it
+// up cleanly across ncurses versions.
+static inline int tui_beep(void) { return beep(); }
+
 // Pads — off-screen buffers that can be viewport-blitted to the screen.
 // The ScrollView primitive allocates one pad per scrollable region, draws
 // its full content into the pad, and uses pnoutrefresh to show only a
