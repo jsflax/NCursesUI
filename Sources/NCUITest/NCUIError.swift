@@ -6,6 +6,12 @@ public enum NCUIError: Error, CustomStringConvertible {
     case productNotFound(productName: String, buildDir: String)
     case launchFailed(reason: String)
     case probeHandshakeTimeout(socketPath: String)
+    case probeHandshakeTimeoutWithDiagnostics(
+        socketPath: String,
+        binary: String,
+        pathEnv: String,
+        paneOutput: String
+    )
     case probeConnectFailed(socketPath: String, underlying: Error)
     case incompatibleProbeVersion(client: Int, server: Int)
     case ioError(String)
@@ -30,6 +36,30 @@ public enum NCUIError: Error, CustomStringConvertible {
             return "launch failed: \(r)"
         case .probeHandshakeTimeout(let p):
             return "probe handshake timed out at \(p)"
+        case .probeHandshakeTimeoutWithDiagnostics(let path, let bin, let pathEnv, let pane):
+            // Truncate pane output so the error message doesn't dwarf
+            // the test runner's display; the artifact bundle can carry
+            // the full thing if needed.
+            let trimmed = pane.split(separator: "\n").suffix(20).joined(separator: "\n")
+            return """
+                probe handshake timed out at \(path)
+                ─── diagnostics ───────────────────────────────────────────
+                binary  : \(bin)
+                PATH    : \(pathEnv)
+                ─── tmux pane (last 20 lines) ─────────────────────────────
+                \(trimmed)
+                ───────────────────────────────────────────────────────────
+                The pane shows what the binary printed before exiting (or
+                while idle if it never tried to bind the socket). Common
+                causes:
+                  • A first-run gate exited before NCUIProbe.shared.start()
+                    — e.g. ClaudeCodeIRC's Doctor.check() can't find
+                    `claude` on PATH.
+                  • Wrong binary resolved — check the `binary` line above.
+                  • The binary doesn't link NCursesUI's probe (only
+                    NCursesUI-based apps auto-bootstrap on
+                    NCUITEST_SOCKET).
+                """
         case .probeConnectFailed(let p, let e):
             return "probe connect failed at \(p): \(e)"
         case .incompatibleProbeVersion(let c, let s):

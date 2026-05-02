@@ -132,10 +132,24 @@ public final class NCUIApplication: @unchecked Sendable {
         do {
             try await client.waitUntilReady(timeout: handshakeTimeout)
         } catch {
+            // Capture diagnostic context BEFORE killing the pane: the
+            // pane often contains the actual reason the binary didn't
+            // bind the socket (Doctor exit message, "command not found",
+            // a stack trace, an early ncurses error). Without this the
+            // user gets a bare "probe handshake timed out" with no clue
+            // what went wrong.
+            let paneCapture: String = (try? driver.capturePane(withEscapes: false))
+                ?? "<capture-pane failed>"
+            let pathHint = env["PATH"] ?? "<unset>"
             driver.kill()
             setState(.terminated)
             if let e = error as? NCUIError, case .probeHandshakeTimeout = e {
-                throw e
+                throw NCUIError.probeHandshakeTimeoutWithDiagnostics(
+                    socketPath: path,
+                    binary: binary,
+                    pathEnv: pathHint,
+                    paneOutput: paneCapture
+                )
             }
             throw NCUIError.probeConnectFailed(socketPath: path, underlying: error)
         }
