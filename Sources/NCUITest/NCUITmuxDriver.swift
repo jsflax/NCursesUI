@@ -1,4 +1,5 @@
 import Foundation
+import os
 #if canImport(Darwin)
 import Darwin
 #elseif canImport(Glibc)
@@ -165,9 +166,15 @@ public final class NCUITmuxDriver: @unchecked Sendable {
     }
 
     func runTmux(_ args: [String]) -> (exit: Int32, stdout: String, stderr: String) {
+        let path: String
+        do {
+            path = try NCUITmuxDriver.resolveTmuxPath()
+        } catch {
+            return (-1, "", "tmux not found: \(error)")
+        }
         let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        task.arguments = ["tmux"] + args
+        task.executableURL = URL(fileURLWithPath: path)
+        task.arguments = args
         let stdout = Pipe()
         let stderr = Pipe()
         task.standardOutput = stdout
@@ -175,7 +182,7 @@ public final class NCUITmuxDriver: @unchecked Sendable {
         do {
             try task.run()
         } catch {
-            return (-1, "", "failed to spawn tmux: \(error)")
+            return (-1, "", "failed to spawn tmux at \(path): \(error)")
         }
         task.waitUntilExit()
         let outData = stdout.fileHandleForReading.readDataToEndOfFile()
@@ -185,5 +192,74 @@ public final class NCUITmuxDriver: @unchecked Sendable {
             String(data: outData, encoding: .utf8) ?? "",
             String(data: errData, encoding: .utf8) ?? ""
         )
+    }
+
+    /// Cached absolute path to the `tmux` binary. Resolved on first call:
+    ///   1. `NCUITEST_TMUX` env override — escape hatch for non-standard
+    ///      installs (nix profiles, custom prefixes, CI containers).
+    ///   2. `which tmux` (uses the test process's PATH).
+    ///   3. Hardcoded Homebrew prefixes (`/opt/homebrew/bin`,
+    ///      `/usr/local/bin`) — handles the common case where the
+    ///      test process inherited a stripped PATH (Xcode schemes, some
+    ///      CI runners) but tmux is installed via Homebrew.
+    /// Throws `NCUIError.tmuxError` with an actionable message if none
+    /// of the above resolves to an executable.
+    private static let _resolvedTmuxPath = OSAllocatedUnfairLock<Result<String, NCUIError>?>(initialState: nil)
+
+    static func resolveTmuxPath() throws -> String {
+        if let cached = _resolvedTmuxPath.withLock({ $0 }) {
+            switch cached {
+            case .success(let p): return p
+            case .failure(let e): throw e
+            }
+        }
+        let result: Result<String, NCUIError>
+        if let resolved = findTmuxBinary() {
+            result = .success(resolved)
+        } else {
+            result = .failure(NCUIError.tmuxError(
+                "tmux binary not found on PATH or at /opt/homebrew/bin/tmux or /usr/local/bin/tmux. " +
+                "Install via `brew install tmux`, or set NCUITEST_TMUX=/path/to/tmux to override."
+            ))
+        }
+        _resolvedTmuxPath.withLock { $0 = result }
+        switch result {
+        case .success(let p): return p
+        case .failure(let e): throw e
+        }
+    }
+
+    private static func findTmuxBinary() -> String? {
+        let fm = FileManager.default
+        // 1. Explicit env override.
+        if let override = ProcessInfo.processInfo.environment["NCUITEST_TMUX"],
+           !override.isEmpty,
+           fm.isExecutableFile(atPath: override) {
+            return override
+        }
+        // 2. `which tmux` against the test process's PATH.
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        task.arguments = ["which", "tmux"]
+        let out = Pipe()
+        task.standardOutput = out
+        task.standardError = Pipe()
+        if (try? task.run()) != nil {
+            task.waitUntilExit()
+            if task.terminationStatus == 0 {
+                let data = out.fileHandleForReading.readDataToEndOfFile()
+                let path = (String(data: data, encoding: .utf8) ?? "")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                if !path.isEmpty, fm.isExecutableFile(atPath: path) {
+                    return path
+                }
+            }
+        }
+        // 3. Hardcoded Homebrew prefixes — same pattern Doctor.which() uses
+        //    in ClaudeCodeIRC for `claude` / `cloudflared` resolution.
+        for candidate in ["/opt/homebrew/bin/tmux", "/usr/local/bin/tmux"] {
+            if fm.isExecutableFile(atPath: candidate) { return candidate }
+        }
+        return nil
     }
 }
