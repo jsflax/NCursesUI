@@ -101,6 +101,22 @@ public final class NCUIApplication: @unchecked Sendable {
         var env = launchEnvironment
         env["NCUITEST_SOCKET"] = path
 
+        // Inherit the user's interactive-shell PATH unless the caller
+        // pinned PATH explicitly. Without this, tests run from Xcode (or
+        // any harness with a stripped PATH) spawn the binary into a
+        // minimal environment where `claude`, `cloudflared`, brew-installed
+        // tools, etc. aren't reachable — Doctor-style first-run gates exit
+        // before our probe binds the socket and the test sees only a
+        // probe-handshake timeout. Resolving the user's PATH once and
+        // injecting it makes the spawned process behave the way it would
+        // if the user ran it from their own terminal.
+        if env["PATH"] == nil, let inherited = Self.userShellPath() {
+            env["PATH"] = inherited
+        }
+        if env["HOME"] == nil, let home = ProcessInfo.processInfo.environment["HOME"] {
+            env["HOME"] = home
+        }
+
         let sessionName = "ncuitest-\(getpid())-\(label)-\(UUID().uuidString.prefix(6))"
         let driver = NCUITmuxDriver(sessionName: sessionName)
         let cmd = ([binary] + launchArguments).map(Self.shellQuote).joined(separator: " ")
@@ -174,5 +190,37 @@ public final class NCUIApplication: @unchecked Sendable {
             return s
         }
         return "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+
+    /// Cached PATH resolved by spawning the user's login shell with
+    /// `-ilc 'echo $PATH'`. Same path you'd see by opening a fresh
+    /// Terminal.app tab. `-i` sources `~/.zshrc` / `~/.bashrc`, `-l` sources
+    /// `~/.zprofile` / `~/.profile` — together they produce the canonical
+    /// interactive PATH. Falls back to `nil` if the shell call fails.
+    private static let _shellPath = OSAllocatedUnfairLock<String??>(initialState: nil)
+
+    static func userShellPath() -> String? {
+        if let cached = _shellPath.withLock({ $0 }) { return cached }
+        let resolved = resolveUserShellPath()
+        _shellPath.withLock { $0 = resolved }
+        return resolved
+    }
+
+    private static func resolveUserShellPath() -> String? {
+        let shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
+        guard FileManager.default.isExecutableFile(atPath: shell) else { return nil }
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: shell)
+        task.arguments = ["-ilc", "printf '%s' \"$PATH\""]
+        let stdout = Pipe()
+        task.standardOutput = stdout
+        task.standardError = Pipe()
+        do { try task.run() } catch { return nil }
+        task.waitUntilExit()
+        guard task.terminationStatus == 0 else { return nil }
+        let data = stdout.fileHandleForReading.readDataToEndOfFile()
+        let path = (String(data: data, encoding: .utf8) ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return path.isEmpty ? nil : path
     }
 }
