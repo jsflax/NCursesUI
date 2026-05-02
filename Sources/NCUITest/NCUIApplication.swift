@@ -12,6 +12,10 @@ public final class NCUIApplication: @unchecked Sendable {
     var socketPath: String?
     var resolvedBinary: String?
     var tmuxDriver: NCUITmuxDriver?
+    /// Stdout+stderr tee log path for the spawned binary. Survives the
+    /// pane's destruction (which happens when the binary exits) so the
+    /// failure path has something to read on probe-handshake timeout.
+    var launchLogPath: String?
     private let stateLock = OSAllocatedUnfairLock<State>(initialState: .notLaunched)
 
     public enum State: Sendable {
@@ -119,7 +123,25 @@ public final class NCUIApplication: @unchecked Sendable {
 
         let sessionName = "ncuitest-\(getpid())-\(label)-\(UUID().uuidString.prefix(6))"
         let driver = NCUITmuxDriver(sessionName: sessionName)
-        let cmd = ([binary] + launchArguments).map(Self.shellQuote).joined(separator: " ")
+
+        // Tee the binary's stdout + stderr to a log file in addition to the
+        // pane. tmux closes panes when their command exits — if the binary
+        // crashes immediately the session is gone before `capture-pane`
+        // can read it. The log file survives the pane's death so we can
+        // still surface the failure reason. ncurses redraws still go to
+        // the pane (stdout = the tty); the log carries a duplicate plus
+        // anything written to stderr. Wrapping in `script -q` would also
+        // capture the pty escape codes, but `tee` is enough for "what did
+        // the binary print before exiting".
+        let logPath = (NSTemporaryDirectory() as NSString)
+            .appendingPathComponent("\(sessionName).log")
+        try? FileManager.default.removeItem(atPath: logPath)
+        self.launchLogPath = logPath
+        let binaryQuoted = Self.shellQuote(binary)
+        let argsQuoted = launchArguments.map(Self.shellQuote).joined(separator: " ")
+        let logQuoted = Self.shellQuote(logPath)
+        let cmd = "\(binaryQuoted)\(argsQuoted.isEmpty ? "" : " \(argsQuoted)") 2>&1 | tee \(logQuoted)"
+
         _ = try driver.startSession(
             env: env,
             command: cmd,
@@ -132,14 +154,21 @@ public final class NCUIApplication: @unchecked Sendable {
         do {
             try await client.waitUntilReady(timeout: handshakeTimeout)
         } catch {
-            // Capture diagnostic context BEFORE killing the pane: the
-            // pane often contains the actual reason the binary didn't
-            // bind the socket (Doctor exit message, "command not found",
-            // a stack trace, an early ncurses error). Without this the
-            // user gets a bare "probe handshake timed out" with no clue
-            // what went wrong.
+            // Pane content first (richest — has cursor + redrawn frames),
+            // log file second (survives a crashed binary's pane death),
+            // never both empty in practice.
             let paneCapture: String = (try? driver.capturePane(withEscapes: false))
-                ?? "<capture-pane failed>"
+                ?? "<capture-pane failed (pane likely already destroyed by binary exit)>"
+            let logCapture: String = (try? String(contentsOfFile: logPath, encoding: .utf8))
+                ?? ""
+            let combinedDiagnostic: String
+            if logCapture.isEmpty {
+                combinedDiagnostic = paneCapture
+            } else if paneCapture.contains("capture-pane failed") {
+                combinedDiagnostic = "(via tee log — pane was already destroyed)\n\(logCapture)"
+            } else {
+                combinedDiagnostic = "PANE:\n\(paneCapture)\n\nTEE LOG:\n\(logCapture)"
+            }
             let pathHint = env["PATH"] ?? "<unset>"
             driver.kill()
             setState(.terminated)
@@ -148,7 +177,7 @@ public final class NCUIApplication: @unchecked Sendable {
                     socketPath: path,
                     binary: binary,
                     pathEnv: pathHint,
-                    paneOutput: paneCapture
+                    paneOutput: combinedDiagnostic
                 )
             }
             throw NCUIError.probeConnectFailed(socketPath: path, underlying: error)
@@ -181,6 +210,9 @@ public final class NCUIApplication: @unchecked Sendable {
         tmuxDriver?.kill()
         if let path = socketPath {
             try? FileManager.default.removeItem(atPath: path)
+        }
+        if let log = launchLogPath {
+            try? FileManager.default.removeItem(atPath: log)
         }
     }
 
