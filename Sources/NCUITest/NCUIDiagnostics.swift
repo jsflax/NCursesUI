@@ -56,30 +56,32 @@ public enum NCUIDiagnostics {
         return dir
     }
 
+    /// Synchronous bridge to `captureBundle` — runs the async capture on a
+    /// dispatched task and waits up to 10s. Used from `waitForExistence`'s
+    /// throw path so callers don't have to await diagnostics. Returns nil if
+    /// capture itself fails or times out (diagnostics must never mask the
+    /// original error).
+    public static func captureBundleSync(for app: NCUIApplication, scope: String) -> String? {
+        let sem = DispatchSemaphore(value: 0)
+        let box = ResultBox()
+        Task.detached {
+            let dir = await captureBundle(for: app, scope: scope)
+            box.value = dir
+            sem.signal()
+        }
+        let timeout = DispatchTime.now() + .seconds(10)
+        guard sem.wait(timeout: timeout) == .success else { return nil }
+        return box.value
+    }
+
+    private final class ResultBox: @unchecked Sendable {
+        var value: String?
+    }
+
     private static func timestamp() -> String {
         let f = DateFormatter()
         f.locale = Locale(identifier: "en_US_POSIX")
         f.dateFormat = "yyyyMMdd-HHmmss-SSS"
         return f.string(from: Date())
-    }
-}
-
-extension NCUIElement {
-    /// Wait for existence with diagnostic bundling on failure. Replaces the
-    /// underlying `waitForExistence` for tests that want auto-capture.
-    @discardableResult
-    public func waitForExistenceWithDiagnostics(
-        timeout: TimeInterval = 5,
-        scope: String = "wait"
-    ) async throws -> Bool {
-        do {
-            return try await waitForExistence(timeout: timeout)
-        } catch let error as NCUIError {
-            if case .waitTimeout(let spec, let t, _) = error {
-                let dir = await NCUIDiagnostics.captureBundle(for: app, scope: scope)
-                throw NCUIError.waitTimeout(spec: spec, timeout: t, artifactsDir: dir)
-            }
-            throw error
-        }
     }
 }

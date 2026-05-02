@@ -22,7 +22,7 @@ struct DiagnosticsTests {
 
         let ghost = app.staticTexts.matching(.label(contains: "definitely never appears")).firstMatch
         do {
-            _ = try await ghost.waitForExistenceWithDiagnostics(timeout: 0.3, scope: "diag-test")
+            _ = try await ghost.waitForExistence(timeout: 0.3, captureScope: "diag-test")
             Issue.record("expected timeout to throw")
         } catch let error as NCUIError {
             if case .waitTimeout(_, _, let dir) = error {

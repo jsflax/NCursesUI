@@ -71,16 +71,28 @@ public struct NCUIElement: Sendable {
     }
 
     /// Wait until the element exists. Returns true on success, throws on
-    /// timeout (NCUIError.waitTimeout).
+    /// timeout (NCUIError.waitTimeout). On timeout, automatically captures
+    /// a diagnostic bundle (`Tests/Artifacts/<scope>/<timestamp>/<label>.{json,ansi,png,log}`)
+    /// for every running app and includes the path in the thrown error.
+    /// Pass `captureScope: nil` to opt out of auto-capture (rare).
     @discardableResult
-    public func waitForExistence(timeout: TimeInterval = 5) async throws -> Bool {
+    public func waitForExistence(
+        timeout: TimeInterval = 5,
+        captureScope: String? = "wait"
+    ) async throws -> Bool {
         let timeoutMs = Int(timeout * 1000)
         let response = try await app.sendRaw(.awaitPredicate(spec, timeoutMs: timeoutMs))
         switch response.result {
         case .nodes(let matches):
             return !matches.isEmpty
         case .error(let msg) where msg.contains("timeout"):
-            throw NCUIError.waitTimeout(spec: describe(spec), timeout: timeout, artifactsDir: nil)
+            let dir = captureScope.flatMap { scope in
+                // Synchronously bridge to the async capture; on a timeout the
+                // user is already paying multiple seconds, the extra tree dump
+                // and PNG render is negligible.
+                NCUIDiagnostics.captureBundleSync(for: app, scope: scope)
+            }
+            throw NCUIError.waitTimeout(spec: describe(spec), timeout: timeout, artifactsDir: dir)
         case .error(let msg):
             throw NCUIError.probeError(msg)
         default:

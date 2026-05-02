@@ -3,3 +3,5 @@
 .swiftpm/
 Package.resolved
 *.xcodeproj
+Tests/Artifacts/
+Tests/Snapshots/

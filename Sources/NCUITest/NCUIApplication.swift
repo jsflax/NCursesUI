@@ -51,7 +51,45 @@ public final class NCUIApplication: @unchecked Sendable {
             return true
         }
         guard canStart else { throw NCUIError.alreadyLaunched }
+        try await performLaunch(handshakeTimeout: handshakeTimeout, terminalSize: terminalSize)
+    }
 
+    /// Restart the underlying tmux pane and re-handshake the probe with a
+    /// fresh unix socket. Required for tests that crash + relaunch the app
+    /// (e.g. orphan-recovery scenarios). Only valid from `.terminated`.
+    public func relaunch(
+        handshakeTimeout: TimeInterval = 10,
+        terminalSize: (cols: Int, rows: Int) = (240, 60)
+    ) async throws {
+        let canRelaunch = stateLock.withLock { (current: inout State) -> Bool in
+            guard current == .terminated else { return false }
+            current = .launching
+            return true
+        }
+        guard canRelaunch else { throw NCUIError.notLaunched }
+
+        // Defensive: terminate() should have killed the prior session, but
+        // re-kill in case a caller skipped it. Reset all per-session state.
+        tmuxDriver?.kill()
+        probeClient?.close()
+        tmuxDriver = nil
+        probeClient = nil
+        if let path = socketPath {
+            try? FileManager.default.removeItem(atPath: path)
+        }
+        socketPath = nil
+
+        try await performLaunch(handshakeTimeout: handshakeTimeout, terminalSize: terminalSize)
+    }
+
+    /// Shared launch core: resolves the binary, picks a fresh socket path +
+    /// session name, spawns the tmux pane, awaits the probe handshake, and
+    /// transitions to `.running`. Caller is responsible for transitioning
+    /// the state to `.launching` first.
+    private func performLaunch(
+        handshakeTimeout: TimeInterval,
+        terminalSize: (cols: Int, rows: Int)
+    ) async throws {
         let binary = try BinaryResolver.resolve(productName: productName)
         self.resolvedBinary = binary
 

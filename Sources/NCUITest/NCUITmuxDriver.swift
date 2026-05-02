@@ -1,4 +1,9 @@
 import Foundation
+#if canImport(Darwin)
+import Darwin
+#elseif canImport(Glibc)
+import Glibc
+#endif
 
 /// One tmux session per `NCUIApplication`. Each session contains a single
 /// pane running the binary under test; sessions don't share state so concurrent
@@ -7,6 +12,7 @@ public final class NCUITmuxDriver: @unchecked Sendable {
     public let sessionName: String
     private let lock = NSLock()
     private var paneId: String?
+    private var panePid: Int32?
     private var sessionStarted = false
 
     public init(sessionName: String) {
@@ -56,15 +62,70 @@ public final class NCUITmuxDriver: @unchecked Sendable {
         self.sessionStarted = true
         // Disable status bar so it doesn't eat a row of the terminal.
         _ = runTmux(["set-option", "-t", sessionName, "status", "off"])
+        // Cache the pane's foreground PID so we can reap descendants
+        // (e.g. `claude -p` subprocesses) on kill — tmux SIGHUP doesn't
+        // always reach grandchildren.
+        let pidResult = runTmux(["display-message", "-p", "-t", pane, "#{pane_pid}"])
+        if pidResult.exit == 0,
+           let pid = Int32(pidResult.stdout.trimmingCharacters(in: .whitespacesAndNewlines)) {
+            self.panePid = pid
+        }
         return pane
     }
 
     public func kill() {
         lock.lock(); defer { lock.unlock() }
         guard sessionStarted else { return }
+        // Reap descendants first — tmux kill-session sends SIGHUP to the
+        // pane's foreground process, but `claude -p` subprocesses spawned
+        // by ClaudeCliDriver fork into their own process group and survive
+        // the HUP. Walk the descendant tree from pane_pid and kill them
+        // explicitly. Bash _lib.sh:smoke_teardown does the same with a
+        // broader `pkill -9 -f "claude -p"`; we scope to actual descendants.
+        if let pid = panePid {
+            killDescendants(of: pid)
+        }
         _ = runTmux(["kill-session", "-t", sessionName])
         paneId = nil
+        panePid = nil
         sessionStarted = false
+    }
+
+    /// Recursively SIGTERM every process whose ancestor is `rootPid`. Used
+    /// during teardown to reap subprocesses that survive `tmux kill-session`.
+    private func killDescendants(of rootPid: Int32) {
+        // Build the descendant set via repeated `pgrep -P`.
+        var frontier: [Int32] = [rootPid]
+        var all: Set<Int32> = []
+        while let pid = frontier.popLast() {
+            let result = runProcess("/usr/bin/pgrep", ["-P", "\(pid)"])
+            guard result.exit == 0 else { continue }
+            for line in result.stdout.split(separator: "\n") {
+                if let child = Int32(line.trimmingCharacters(in: .whitespaces)),
+                   !all.contains(child), child != rootPid {
+                    all.insert(child)
+                    frontier.append(child)
+                }
+            }
+        }
+        // Kill all gathered descendants. SIGTERM first to give cleanup
+        // hooks a chance, then SIGKILL after a short grace period.
+        for pid in all { _ = Darwin.kill(pid, SIGTERM) }
+        usleep(200_000)  // 200ms grace
+        for pid in all { _ = Darwin.kill(pid, SIGKILL) }
+    }
+
+    private func runProcess(_ path: String, _ args: [String]) -> (exit: Int32, stdout: String) {
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: path)
+        task.arguments = args
+        let stdout = Pipe()
+        task.standardOutput = stdout
+        task.standardError = Pipe()
+        do { try task.run() } catch { return (-1, "") }
+        task.waitUntilExit()
+        let data = stdout.fileHandleForReading.readDataToEndOfFile()
+        return (task.terminationStatus, String(data: data, encoding: .utf8) ?? "")
     }
 
     public func sendKeys(_ keys: String) throws {
