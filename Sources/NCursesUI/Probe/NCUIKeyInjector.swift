@@ -46,7 +46,14 @@ enum NCUIKeyTranslate {
                 return nil
             }
             return .key(Int32(scalar))
-        case .code(let code, _):
+        case .code(let code, let mods):
+            // Shift-Tab is its own ncurses code (KEY_BTAB = 353). Without
+            // this special case `.code(.tab, modifiers: .shift)` would
+            // inject plain Tab (9) and any `.onKeyPress(KEY_BTAB)` handler
+            // (e.g. WorkspaceView's permissionMode cycler) would never fire.
+            if code == .tab && mods.contains(.shift) {
+                return .key(0o541)              // KEY_BTAB = 353 (octal 0o541)
+            }
             return .key(ncursesCode(for: code))
         }
     }
