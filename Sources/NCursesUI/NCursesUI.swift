@@ -1200,7 +1200,17 @@ public struct ScrollView<Content: View>: View, ContainerRendering, KeyHandling, 
     }
 
     public func childRects(children: [any ViewNode], in rect: Rect) -> [Rect] {
-        guard children.first != nil else { return [] }
+        // Match `beforeChildren`'s guard: when there's no room for a pad
+        // (parent gave us a zero-height or sub-scrollbar-width slot — e.g.
+        // we got pushed off-screen by overflowing siblings), `beforeChildren`
+        // bails before pushing a pad target. If we still hand the inner
+        // child a pad-local rect here, it draws to whatever target IS on
+        // the stack — stdscr — at coords (0, 0), painting over the rest of
+        // the screen. Returning [] keeps the child unmounted-for-layout in
+        // that frame; it'll draw normally as soon as the parent gives us
+        // any real space again.
+        guard rect.width > Self.scrollbarCols, rect.height > 0,
+              children.first != nil else { return [] }
         let w = max(0, rect.width - Self.scrollbarCols)
         // Children render in PAD-LOCAL coords: (0, 0) is the pad's top-left.
         // Height is whatever `beforeChildren` sized the pad to (measured

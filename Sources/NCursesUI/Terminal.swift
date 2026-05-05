@@ -6,7 +6,11 @@ import Foundation
 public protocol Screen: AnyObject, Sendable {
     var rows: Int { get }
     var cols: Int { get }
-    func move(_ y: Int32, _ x: Int32)
+    /// Move the cursor; returns `false` if the coord is outside the
+    /// current target's bounds (stdscr or active pad). Callers should
+    /// skip the subsequent `addstr` when this fails — see `Term.put`.
+    @discardableResult
+    func move(_ y: Int32, _ x: Int32) -> Bool
     func addstr(_ s: String)
     func attron(_ attrs: Int32)
     func attroff(_ attrs: Int32)
@@ -138,7 +142,7 @@ public final class NCursesScreen: Screen, @unchecked Sendable {
 
     public var rows: Int { Int(tui_lines()) }
     public var cols: Int { Int(tui_cols()) }
-    public func move(_ y: Int32, _ x: Int32) { wmove(target, y, x) }
+    public func move(_ y: Int32, _ x: Int32) -> Bool { wmove(target, y, x) != ERR }
     public func addstr(_ s: String) { waddstr(target, s) }
     public func attron(_ attrs: Int32) { tui_wattron(target, attrs) }
     public func attroff(_ attrs: Int32) { tui_wattroff(target, attrs) }
@@ -312,7 +316,16 @@ public struct Term {
     }
 
     public static func put(_ y: Int, _ x: Int, _ s: String) {
-        screen.move(Int32(y), Int32(x))
+        // `wmove` returns ERR for out-of-bounds coords on the current
+        // target (stdscr or pad) but leaves the cursor wherever it was
+        // last left. If we just call `addstr` afterwards, the text
+        // lands at the previous-valid cursor position — an overflowing
+        // VStack drawing past `maxY` will dump every off-screen row's
+        // text on top of the last in-bounds row, producing the
+        // "multiple rows piled into one" artifact. Skip the write
+        // when the move fails. Correctness, not perf — bounds vary
+        // by target (pad vs stdscr) so we let ncurses decide.
+        guard screen.move(Int32(y), Int32(x)) else { return }
         screen.addstr(s)
     }
 
@@ -322,17 +335,17 @@ public struct Term {
         if bold { attrs |= tui_a_bold() }
         if inverted { attrs |= tui_a_reverse() }
         screen.attron(attrs)
-        screen.move(Int32(y), Int32(x))
+        defer { screen.attroff(attrs) }
+        guard screen.move(Int32(y), Int32(x)) else { return }
         screen.addstr(s)
-        screen.attroff(attrs)
     }
 
     public static func putDim(_ y: Int, _ x: Int, _ s: String) {
         let attrs = tui_a_dim()
         screen.attron(attrs)
-        screen.move(Int32(y), Int32(x))
+        defer { screen.attroff(attrs) }
+        guard screen.move(Int32(y), Int32(x)) else { return }
         screen.addstr(s)
-        screen.attroff(attrs)
     }
 
     public static func hline(_ y: Int, _ x: Int, _ width: Int) {
